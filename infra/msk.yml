@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Minimal MSK Serverless cluster with IAM auth and optional CloudWatch logging
+Description: Minimal MSK Serverless cluster with IAM authentication
 
 Parameters:
   MskSubnetIds:
@@ -8,23 +8,7 @@ Parameters:
   MskSecurityGroupId:
     Type: AWS::EC2::SecurityGroup::Id
     Description: Security group for the MSK cluster
-  EnableCloudWatchLogs:
-    Type: String
-    Default: 'false'
-    AllowedValues: ['true', 'false']
-    Description: Enable CloudWatch Logs for the MSK cluster
-
-Conditions:
-  EnableLogs: !Equals [!Ref EnableCloudWatchLogs, 'true']
-
 Resources:
-  MskLogGroup:
-    Type: AWS::Logs::LogGroup
-    Condition: EnableLogs
-    Properties:
-      LogGroupName: !Sub '/aws/msk/${AWS::StackName}'
-      RetentionInDays: 7
-
   MskCluster:
     Type: AWS::MSK::ServerlessCluster
     Properties:
@@ -37,9 +21,6 @@ Resources:
         - SubnetIds: !Ref MskSubnetIds
           SecurityGroups:
             - !Ref MskSecurityGroupId
-      LoggingInfo:
-        BrokerLogs:
-          CloudWatchLogs: !If [EnableLogs, {Enabled: true, LogGroup: !Ref MskLogGroup}, {Enabled: false}]
 
 Outputs:
   MskClusterArn:

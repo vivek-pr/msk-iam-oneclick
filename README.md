@@ -1,5 +1,5 @@
 # msk-iam-oneclick
-One-click MSK IAM POC. CloudFormation provisions VPC, MSK (Serverless), EC2 client + IAM/SSM. A small FastAPI UI (profile-aware) deploys, tests (produce/consume via SASL/IAM), and tears down.
+One-click MSK IAM POC. CloudFormation provisions VPC, MSK (Serverless), EC2 client + IAM/SSM. A small FastAPI UI (profile-aware) deploys, tests (produce/consume via SASL/IAM), and tears down. All CloudFormation templates live under the `infra/` directory.
 
 ## FastAPI app
 
@@ -26,7 +26,7 @@ made to verify the profile, and the resulting identity is displayed on success.
 
 ## VPC stack
 
-The `vpc.yml` template creates a minimal networking layer for the proof of concept:
+The `infra/vpc.yml` template creates a minimal networking layer for the proof of concept:
 
 - `/22` VPC
 - three private subnets across Availability Zones for MSK
@@ -44,13 +44,12 @@ The `vpc.yml` template creates a minimal networking layer for the proof of conce
 
 ## MSK stack
 
-The `msk.yml` template provisions a minimal MSK Serverless cluster with IAM authentication. It expects the private subnet IDs and security group from the VPC stack and uses AWS-managed encryption at rest.
+The `infra/msk.yml` template provisions a minimal MSK Serverless cluster with IAM authentication. It expects the private subnet IDs and security group from the VPC stack and uses AWS-managed encryption at rest.
 
 ### Parameters
 
 - `MskSubnetIds` – list of private subnets for the cluster
 - `MskSecurityGroupId` – security group allowing clients to reach the cluster
-- `EnableCloudWatchLogs` – set to `true` to enable broker logging to CloudWatch
 
 ### Outputs
 
@@ -58,7 +57,7 @@ The `msk.yml` template provisions a minimal MSK Serverless cluster with IAM auth
 
 ## EC2 client stack
 
-The `ec2.yml` template provisions a t3.micro Amazon Linux 2023 instance with an IAM role for SSM and MSK access.
+The `infra/ec2.yml` template provisions a t3.micro Amazon Linux 2023 instance with an IAM role for SSM and MSK access.
 
 The role's `MskAccess` policy scopes `kafka-cluster` permissions to the
 specified cluster ARN as well as topic and consumer group ARNs derived from it.
@@ -78,4 +77,4 @@ can create and use arbitrary names.
 
 ## SSM document
 
-The `ssm.yml` template defines an `AWS::SSM::Document` that installs the Kafka CLI, Java 17, and the AWS MSK IAM authentication library on an EC2 instance. The document creates `/opt/msk/client.properties` configured for `SASL_SSL` with IAM, downloads the `aws-msk-iam-auth` JAR, and writes helper scripts `/opt/msk/produce.sh` and `consume.sh`.
+The `infra/ssm.yml` template defines an `AWS::SSM::Document` that installs the Kafka CLI, Java 17, and the AWS MSK IAM authentication library on an EC2 instance. The document creates `/opt/msk/client.properties` configured for `SASL_SSL` with IAM, downloads the `aws-msk-iam-auth` JAR, and writes helper scripts `/opt/msk/produce.sh` and `consume.sh`.

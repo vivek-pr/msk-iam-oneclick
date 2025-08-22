@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import boto3
+from botocore.exceptions import ClientError
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.sessions import SessionMiddleware
 from fastapi.responses import HTMLResponse
@@ -104,35 +107,156 @@ def _register_operation(fn) -> str:
     return op_id
 
 
+def _poll_stack_events(cf, stack_name: str, op: Operation) -> None:
+    """Stream stack events until the stack reaches a terminal state."""
+    seen: set[str] = set()
+    while True:
+        events = cf.describe_stack_events(StackName=stack_name)["StackEvents"]
+        for ev in reversed(events):
+            eid = ev["EventId"]
+            if eid in seen:
+                continue
+            seen.add(eid)
+            reason = ev.get("ResourceStatusReason", "")
+            msg = f"{ev['ResourceStatus']} {ev['LogicalResourceId']} {reason}".strip()
+            op.logs.append(msg)
+        stack = cf.describe_stacks(StackName=stack_name)["Stacks"][0]
+        status = stack["StackStatus"]
+        if status.endswith("COMPLETE"):
+            return
+        if "FAILED" in status or "ROLLBACK" in status:
+            raise Exception(f"{stack_name} {status}")
+        time.sleep(5)
+
+
+def _deploy_stack(cf, stack_name: str, template_body: str, parameters: List[Dict[str, str]], op: Operation) -> None:
+    """Create or update a stack and stream its events."""
+    exists = True
+    try:
+        cf.describe_stacks(StackName=stack_name)
+    except ClientError as e:
+        if "does not exist" in str(e):
+            exists = False
+        else:
+            raise
+    kwargs = {
+        "StackName": stack_name,
+        "TemplateBody": template_body,
+        "Parameters": parameters,
+        "Capabilities": ["CAPABILITY_NAMED_IAM"],
+    }
+    if exists:
+        try:
+            cf.update_stack(**kwargs)
+        except ClientError as e:
+            if "No updates are to be performed" in str(e):
+                op.logs.append(f"No changes for {stack_name}")
+                return
+            raise
+    else:
+        cf.create_stack(**kwargs)
+    _poll_stack_events(cf, stack_name, op)
+
+
+def _delete_stack(cf, stack_name: str, op: Operation) -> None:
+    try:
+        cf.describe_stacks(StackName=stack_name)
+    except ClientError as e:
+        if "does not exist" in str(e):
+            op.logs.append(f"Stack {stack_name} missing")
+            return
+        raise
+    cf.delete_stack(StackName=stack_name)
+    _poll_stack_events(cf, stack_name, op)
+
+
+def _get_stack_outputs(cf, stack_name: str) -> Dict[str, str]:
+    stack = cf.describe_stacks(StackName=stack_name)["Stacks"][0]
+    return {o["OutputKey"]: o["OutputValue"] for o in stack.get("Outputs", [])}
+
+
 @app.post("/api/deploy")
 async def api_deploy(request: Request) -> Dict[str, str]:
-    """Simulate infrastructure deployment."""
+    """Create or update the CloudFormation stacks and stream events."""
     if "profile" not in request.session:
         raise HTTPException(status_code=400, detail="session not initialised")
     data = await request.json()
+    profile = data.get("profile") or request.session["profile"]
+    region = request.session.get("region")
+    stack_base = request.session.get("stack_name", "msk-iam-oneclick")
+    create_nat = data.get("CreateNAT", False)
 
     def runner(op: Operation) -> None:
         try:
-            steps = [
-                ("Starting deployment", 5),
-                ("Creating VPC", 25),
-                ("Creating MSK cluster", 60),
-                ("Launching EC2", 80),
-                ("Finalising", 95),
-            ]
-            for msg, prog in steps:
-                op.logs.append(msg)
-                op.progress = prog
-                time.sleep(1)
+            session = boto3.Session(profile_name=profile, region_name=region)
+            cf = session.client("cloudformation")
+            kafka = session.client("kafka")
+            infra = Path(__file__).resolve().parent.parent / "infra"
+
+            op.logs.append("Deploying VPC stack")
+            _deploy_stack(
+                cf,
+                f"{stack_base}-vpc",
+                (infra / "vpc.yml").read_text(),
+                [{"ParameterKey": "CreateNAT", "ParameterValue": "true" if create_nat else "false"}],
+                op,
+            )
+            op.progress = 25
+            vpc_outputs = _get_stack_outputs(cf, f"{stack_base}-vpc")
+
+            op.logs.append("Deploying MSK stack")
+            _deploy_stack(
+                cf,
+                f"{stack_base}-msk",
+                (infra / "msk.yml").read_text(),
+                [
+                    {"ParameterKey": "MskSubnetIds", "ParameterValue": vpc_outputs["MskSubnetIds"]},
+                    {"ParameterKey": "MskSecurityGroupId", "ParameterValue": vpc_outputs["MskSecurityGroupId"]},
+                ],
+                op,
+            )
+            op.progress = 50
+            msk_outputs = _get_stack_outputs(cf, f"{stack_base}-msk")
+            cluster_arn = msk_outputs["MskClusterArn"]
+
+            op.logs.append("Deploying EC2 stack")
+            _deploy_stack(
+                cf,
+                f"{stack_base}-ec2",
+                (infra / "ec2.yml").read_text(),
+                [
+                    {"ParameterKey": "Ec2SubnetId", "ParameterValue": vpc_outputs["Ec2SubnetId"]},
+                    {"ParameterKey": "Ec2SecurityGroupId", "ParameterValue": vpc_outputs["Ec2SecurityGroupId"]},
+                    {"ParameterKey": "MskClusterArn", "ParameterValue": cluster_arn},
+                ],
+                op,
+            )
+            op.progress = 75
+            ec2_outputs = _get_stack_outputs(cf, f"{stack_base}-ec2")
+            instance_id = ec2_outputs["Ec2InstanceId"]
+
+            op.logs.append("Deploying SSM stack")
+            _deploy_stack(
+                cf,
+                f"{stack_base}-ssm",
+                (infra / "ssm.yml").read_text(),
+                [],
+                op,
+            )
+            op.progress = 90
+
+            brokers = kafka.get_bootstrap_brokers(ClusterArn=cluster_arn).get(
+                "BootstrapBrokerStringSaslIam", ""
+            )
             op.outputs = {
-                "ClusterArn": "arn:aws:kafka:region:acct:cluster/demo/123",
-                "BootstrapBrokers": "b-1.example:9098,b-2.example:9098",
-                "Ec2InstanceId": "i-0123456789abcdef0",
+                "ClusterArn": cluster_arn,
+                "BootstrapBrokers": brokers,
+                "Ec2InstanceId": instance_id,
             }
             op.logs.append("Deployment complete")
             op.progress = 100
             op.status = "SUCCEEDED"
-        except Exception as exc:  # pragma: no cover - simulation should not fail
+        except Exception as exc:
             op.logs.append(f"Error: {exc}")
             op.error = {"message": str(exc)}
             op.status = "FAILED"
@@ -143,29 +267,65 @@ async def api_deploy(request: Request) -> Dict[str, str]:
 
 @app.post("/api/test")
 async def api_test(request: Request) -> Dict[str, str]:
-    """Simulate produce/consume test."""
+    """Run produce/consume test on the EC2 client via SSM."""
     if "profile" not in request.session:
         raise HTTPException(status_code=400, detail="session not initialised")
     data = await request.json()
+    profile = data.get("profile") or request.session["profile"]
     topic = data.get("TopicName", "poc-topic")
+    region = request.session.get("region")
+    stack_base = request.session.get("stack_name", "msk-iam-oneclick")
 
     def runner(op: Operation) -> None:
         try:
-            steps = [
-                ("Running setup", 20),
-                ("Producing messages", 60),
-                ("Consuming messages", 90),
+            session = boto3.Session(profile_name=profile, region_name=region)
+            cf = session.client("cloudformation")
+            ssm = session.client("ssm")
+            kafka = session.client("kafka")
+
+            msk_outputs = _get_stack_outputs(cf, f"{stack_base}-msk")
+            ec2_outputs = _get_stack_outputs(cf, f"{stack_base}-ec2")
+            cluster_arn = msk_outputs["MskClusterArn"]
+            instance_id = ec2_outputs["Ec2InstanceId"]
+            brokers = kafka.get_bootstrap_brokers(ClusterArn=cluster_arn)[
+                "BootstrapBrokerStringSaslIam"
             ]
-            for msg, prog in steps:
-                op.logs.append(msg)
-                op.progress = prog
-                time.sleep(1)
-            messages = ["1", "2", "3", "4", "5"]
-            op.outputs = {"messages": messages, "topic": topic}
+
+            op.logs.append("Running test via SSM")
+            cmd = (
+                "set -e; "
+                f"/opt/kafka/bin/kafka-topics.sh --bootstrap-server {brokers} --topic {topic} --create --if-not-exists; "
+                f"printf '1\\n2\\n3\\n4\\n5\\n' | /opt/msk/produce.sh {brokers} {topic}; "
+                f"/opt/msk/consume.sh {brokers} {topic} --max-messages 5 --timeout-ms 10000"
+            )
+            resp = ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={"commands": [cmd]},
+            )
+            cmd_id = resp["Command"]["CommandId"]
+
+            while True:
+                inv = ssm.get_command_invocation(
+                    CommandId=cmd_id, InstanceId=instance_id
+                )
+                status = inv["Status"]
+                if status in ("Pending", "InProgress", "Delayed"):
+                    time.sleep(5)
+                    continue
+                if status != "Success":
+                    raise Exception(inv.get("StandardErrorContent") or status)
+                output = inv.get("StandardOutputContent", "")
+                messages = [
+                    line for line in output.splitlines() if line.strip()
+                ][-5:]
+                op.outputs = {"messages": messages, "topic": topic}
+                break
+
             op.logs.append("Test complete")
             op.progress = 100
             op.status = "SUCCEEDED"
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             op.logs.append(f"Error: {exc}")
             op.error = {"message": str(exc)}
             op.status = "FAILED"
@@ -176,27 +336,32 @@ async def api_test(request: Request) -> Dict[str, str]:
 
 @app.post("/api/teardown")
 async def api_teardown(request: Request) -> Dict[str, str]:
-    """Simulate stack deletion."""
+    """Delete the CloudFormation stacks in reverse order."""
     if "profile" not in request.session:
         raise HTTPException(status_code=400, detail="session not initialised")
     data = await request.json()
+    profile = data.get("profile") or request.session["profile"]
+    region = request.session.get("region")
+    stack_base = request.session.get("stack_name", "msk-iam-oneclick")
 
     def runner(op: Operation) -> None:
         try:
+            session = boto3.Session(profile_name=profile, region_name=region)
+            cf = session.client("cloudformation")
             steps = [
-                ("Deleting SSM", 20),
-                ("Deleting EC2", 50),
-                ("Deleting MSK", 80),
-                ("Deleting VPC", 95),
+                (f"{stack_base}-ssm", 20),
+                (f"{stack_base}-ec2", 50),
+                (f"{stack_base}-msk", 80),
+                (f"{stack_base}-vpc", 95),
             ]
-            for msg, prog in steps:
-                op.logs.append(msg)
+            for name, prog in steps:
+                op.logs.append(f"Deleting {name}")
+                _delete_stack(cf, name, op)
                 op.progress = prog
-                time.sleep(1)
             op.logs.append("Teardown complete")
             op.progress = 100
             op.status = "SUCCEEDED"
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             op.logs.append(f"Error: {exc}")
             op.error = {"message": str(exc)}
             op.status = "FAILED"

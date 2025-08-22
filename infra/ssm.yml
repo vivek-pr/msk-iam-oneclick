@@ -53,3 +53,4 @@ Resources:
                   /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server "$BOOTSTRAP" --consumer.config /opt/msk/client.properties --topic "$TOPIC" "$@"
                   EOCS
                   chmod +x /opt/msk/produce.sh /opt/msk/consume.sh
+
