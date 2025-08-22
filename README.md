@@ -32,3 +32,18 @@ The `msk.yml` template provisions a minimal MSK Serverless cluster with IAM auth
 ### Outputs
 
 - `MskClusterArn` – ARN of the created MSK Serverless cluster
+
+## EC2 client stack
+
+The `ec2.yml` template provisions a t3.micro Amazon Linux 2023 instance with an IAM role for SSM and MSK access.
+
+### Parameters
+
+- `Ec2SubnetId` – subnet for the EC2 client
+- `Ec2SecurityGroupId` – security group for the EC2 client
+- `MskClusterArn` – ARN of the MSK cluster to grant access
+
+### Outputs
+
+- `Ec2InstanceId` – ID of the created instance
+- `Ec2InstancePrivateIp` – private IP address of the instance
