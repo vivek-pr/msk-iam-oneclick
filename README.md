@@ -60,6 +60,11 @@ The `msk.yml` template provisions a minimal MSK Serverless cluster with IAM auth
 
 The `ec2.yml` template provisions a t3.micro Amazon Linux 2023 instance with an IAM role for SSM and MSK access.
 
+The role's `MskAccess` policy scopes `kafka-cluster` permissions to the
+specified cluster ARN as well as topic and consumer group ARNs derived from it.
+Topic and group resources retain a `*` wildcard suffix so that the `/test` flow
+can create and use arbitrary names.
+
 ### Parameters
 
 - `Ec2SubnetId` – subnet for the EC2 client
