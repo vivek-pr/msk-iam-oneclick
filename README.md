@@ -47,3 +47,7 @@ The `ec2.yml` template provisions a t3.micro Amazon Linux 2023 instance with an 
 
 - `Ec2InstanceId` – ID of the created instance
 - `Ec2InstancePrivateIp` – private IP address of the instance
+
+## SSM document
+
+The `ssm.yml` template defines an `AWS::SSM::Document` that installs the Kafka CLI, Java 17, and the AWS MSK IAM authentication library on an EC2 instance. The document creates `/opt/msk/client.properties` configured for `SASL_SSL` with IAM, downloads the `aws-msk-iam-auth` JAR, and writes helper scripts `/opt/msk/produce.sh` and `consume.sh`.
