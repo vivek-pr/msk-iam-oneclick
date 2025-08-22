@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: SSM document to install Java, Kafka CLI, and MSK IAM libraries on an EC2 client
+
+Resources:
+  MskClientSetupDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: Install Java 17, Kafka CLI, and MSK IAM on Amazon Linux
+        mainSteps:
+          - action: aws:runShellScript
+            name: SetupKafkaClient
+            inputs:
+              runCommand:
+                - |
+                  set -euo pipefail
+                  JAVA_PKG=java-17-amazon-corretto-headless
+                  if ! rpm -q $JAVA_PKG >/dev/null 2>&1; then
+                    dnf install -y $JAVA_PKG
+                  fi
+                  if [ ! -d /opt/kafka ]; then
+                    curl -L -o /tmp/kafka.tgz https://downloads.apache.org/kafka/3.7.0/kafka_2.13-3.7.0.tgz
+                    tar -xzf /tmp/kafka.tgz -C /opt
+                    mv /opt/kafka_2.13-3.7.0 /opt/kafka
+                    rm /tmp/kafka.tgz
+                  fi
+                  mkdir -p /opt/msk
+                  if [ ! -f /opt/msk/aws-msk-iam-auth.jar ]; then
+                    curl -L -o /opt/msk/aws-msk-iam-auth.jar https://github.com/aws/aws-msk-iam-auth/releases/download/v1.1.6/aws-msk-iam-auth-1.1.6-all.jar
+                  fi
+                  cat >/opt/msk/client.properties <<'EOC'
+                  security.protocol=SASL_SSL
+                  sasl.mechanism=AWS_MSK_IAM
+                  sasl.jaas.config=software.amazon.msk.auth.iam.IAMLoginModule required;
+                  sasl.client.callback.handler.class=software.amazon.msk.auth.iam.IAMClientCallbackHandler
+                  EOC
+                  cat >/opt/msk/produce.sh <<'EOP'
+                  #!/bin/bash
+                  set -e
+                  BOOTSTRAP="$1"
+                  TOPIC="$2"
+                  shift 2
+                  /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server "$BOOTSTRAP" --producer.config /opt/msk/client.properties --topic "$TOPIC" "$@"
+                  EOP
+                  cat >/opt/msk/consume.sh <<'EOCS'
+                  #!/bin/bash
+                  set -e
+                  BOOTSTRAP="$1"
+                  TOPIC="$2"
+                  shift 2
+                  /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server "$BOOTSTRAP" --consumer.config /opt/msk/client.properties --topic "$TOPIC" "$@"
+                  EOCS
+                  chmod +x /opt/msk/produce.sh /opt/msk/consume.sh
