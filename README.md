@@ -1,6 +1,23 @@
 # msk-iam-oneclick
 One-click MSK IAM POC. CloudFormation provisions VPC, MSK (Serverless), EC2 client + IAM/SSM. A small FastAPI UI (profile-aware) deploys, tests (produce/consume via SASL/IAM), and tears down.
 
+## FastAPI app
+
+The `app/main.py` module exposes a minimal FastAPI form that asks for an
+AWS profile, region, stack name, and a simple feature toggle. Submitting the
+form creates a `boto3.Session` using the provided profile and region and
+returns the caller identity or an error if the profile is missing or invalid.
+
+Run locally with:
+
+```bash
+pip install fastapi uvicorn boto3
+uvicorn app.main:app --reload
+```
+
+Open <http://127.0.0.1:8000> in a browser and submit the form. An STS call is
+made to verify the profile, and the resulting identity is displayed on success.
+
 ## VPC stack
 
 The `vpc.yml` template creates a minimal networking layer for the proof of concept:
