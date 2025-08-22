@@ -38,11 +38,23 @@ Resources:
                 Action:
                   - kafka-cluster:Connect
                   - kafka-cluster:DescribeCluster
+                Resource: !Ref MskClusterArn
+              - Effect: Allow
+                Action:
                   - kafka-cluster:DescribeTopic
                   - kafka-cluster:CreateTopic
                   - kafka-cluster:ReadData
                   - kafka-cluster:WriteData
-                Resource: !Ref MskClusterArn
+                Resource:
+                  # Wildcard topic and group names so tests can create arbitrary resources
+                  - !Sub
+                      - 'arn:${AWS::Partition}:kafka:${AWS::Region}:${AWS::AccountId}:topic/${ClusterName}/${ClusterUuid}/*'
+                      - ClusterName: !Select [1, !Split ['/', !Ref MskClusterArn]]
+                        ClusterUuid: !Select [2, !Split ['/', !Ref MskClusterArn]]
+                  - !Sub
+                      - 'arn:${AWS::Partition}:kafka:${AWS::Region}:${AWS::AccountId}:group/${ClusterName}/${ClusterUuid}/*'
+                      - ClusterName: !Select [1, !Split ['/', !Ref MskClusterArn]]
+                        ClusterUuid: !Select [2, !Split ['/', !Ref MskClusterArn]]
 
   Ec2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
