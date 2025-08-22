@@ -10,27 +10,14 @@ from fastapi import FastAPI, Form
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 app = FastAPI()
+TEMPLATES = Path(__file__).parent / "templates"
 
-FORM_HTML = """
-<!doctype html>
-<html>
-  <body>
-    <h1>AWS Session Form</h1>
-    <form method="post">
-      <label>AWS Profile: <input type="text" name="profile" required></label><br>
-      <label>Region: <input type="text" name="region" required></label><br>
-      <label>Stack Name: <input type="text" name="stack_name" required></label><br>
-      <label>Enable Feature: <input type="checkbox" name="feature"></label><br>
-      <button type="submit">Submit</button>
-    </form>
-  </body>
-</html>
-"""
 
 @app.get("/", response_class=HTMLResponse)
 async def read_root() -> HTMLResponse:
     """Return a simple HTML form for AWS session parameters."""
-    return HTMLResponse(content=FORM_HTML)
+    html = (TEMPLATES / "session.html").read_text()
+    return HTMLResponse(content=html)
 
 @app.post("/", response_class=HTMLResponse)
 async def create_session(
@@ -62,67 +49,12 @@ async def create_session(
 # ---------------------------------------------------------------------------
 # One-click deployment UI and handlers
 
-DEPLOY_HTML = """
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <title>MSK IAM One-click Deploy</title>
-    <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-      rel="stylesheet">
-  </head>
-  <body class="p-3">
-    <h1 class="mb-4">Deploy stacks</h1>
-    <form id="deploy-form" class="mb-3">
-      <div class="mb-3">
-        <label class="form-label">AWS Profile</label>
-        <input class="form-control" name="profile" required>
-      </div>
-      <div class="mb-3">
-        <label class="form-label">Region</label>
-        <input class="form-control" name="region" required>
-      </div>
-      <div class="mb-3">
-        <label class="form-label">Stack Name</label>
-        <input class="form-control" name="stack_name" required>
-      </div>
-      <button class="btn btn-primary" type="submit">Deploy</button>
-    </form>
-    <pre id="events" class="border p-2 bg-light" style="height: 400px; overflow:auto;"></pre>
-    <script>
-    document.getElementById('deploy-form').addEventListener('submit', async function(e) {
-      e.preventDefault();
-      const log = document.getElementById('events');
-      log.textContent = '';
-      const formData = new FormData(e.target);
-      const response = await fetch('/deploy', {method: 'POST', body: formData});
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const {value, done} = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, {stream: true});
-        const parts = buffer.split('\n\n');
-        buffer = parts.pop();
-        for (const part of parts) {
-          if (part.startsWith('data:')) {
-            log.textContent += part.slice(5).trim() + '\n';
-          }
-        }
-      }
-    });
-    </script>
-  </body>
-</html>
-"""
-
 
 @app.get("/deploy", response_class=HTMLResponse)
 async def deploy_form() -> HTMLResponse:
     """Render the stack deployment form using Bootstrap."""
-    return HTMLResponse(content=DEPLOY_HTML)
+    html = (TEMPLATES / "deploy.html").read_text()
+    return HTMLResponse(content=html)
 
 
 def _stack_exists(cf_client, name: str) -> bool:
@@ -195,6 +127,35 @@ def _stack_outputs(cf_client, name: str) -> dict:
     return outputs
 
 
+def _stream_ssm_command(ssm_client, instance_id: str, **kwargs):
+    """Send an SSM command and yield its output as SSE data lines."""
+    resp = ssm_client.send_command(InstanceIds=[instance_id], **kwargs)
+    command_id = resp["Command"]["CommandId"]
+    stdout_len = 0
+    stderr_len = 0
+    while True:
+        time.sleep(2)
+        invocation = ssm_client.get_command_invocation(
+            CommandId=command_id,
+            InstanceId=instance_id,
+            PluginName="aws:runShellScript",
+        )
+        stdout = invocation.get("StandardOutputContent", "")
+        stderr = invocation.get("StandardErrorContent", "")
+        if stdout_len < len(stdout):
+            for line in stdout[stdout_len:].splitlines():
+                yield f"data: {line}\n\n"
+            stdout_len = len(stdout)
+        if stderr_len < len(stderr):
+            for line in stderr[stderr_len:].splitlines():
+                yield f"data: {line}\n\n"
+            stderr_len = len(stderr)
+        status = invocation["Status"]
+        if status not in ("Pending", "InProgress", "Delayed"):
+            yield f"data: {status}\n\n"
+            break
+
+
 @app.post("/deploy")
 async def deploy(
     profile: str = Form(...),
@@ -246,6 +207,63 @@ async def deploy(
         }
         yield f"data: Outputs: {json.dumps(outputs)}\n\n"
         yield "data: Deployment complete\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.get("/test", response_class=HTMLResponse)
+async def test_form() -> HTMLResponse:
+    """Render the produce/consume test form."""
+    html = (TEMPLATES / "test.html").read_text()
+    return HTMLResponse(content=html)
+
+
+@app.post("/test")
+async def test(
+    profile: str = Form(...),
+    region: str = Form(...),
+    stack_name: str = Form(...),
+    topic_name: str = Form(...),
+):
+    """Run a produce/consume test against the MSK cluster via SSM."""
+    session = boto3.Session(profile_name=profile, region_name=region)
+    cf = session.client("cloudformation")
+    kafka_client = session.client("kafka")
+    ssm_client = session.client("ssm")
+
+    msk_stack = f"{stack_name}-msk"
+    ec2_stack = f"{stack_name}-ec2"
+    msk_outputs = _stack_outputs(cf, msk_stack)
+    ec2_outputs = _stack_outputs(cf, ec2_stack)
+    cluster_arn = msk_outputs.get("MskClusterArn", "")
+    instance_id = ec2_outputs.get("Ec2InstanceId", "")
+
+    def event_stream():
+        yield "data: Running setup document\n\n"
+        yield from _stream_ssm_command(
+            ssm_client,
+            instance_id,
+            DocumentName="MskClientSetupDocument",
+        )
+
+        yield "data: Fetching bootstrap brokers\n\n"
+        brokers = kafka_client.get_bootstrap_brokers(ClusterArn=cluster_arn)[
+            "BootstrapBrokerStringSaslIam"
+        ]
+        yield f"data: Brokers: {brokers}\n\n"
+
+        commands = [
+            f"/opt/kafka/bin/kafka-topics.sh --bootstrap-server '{brokers}' --command-config /opt/msk/client.properties --create --if-not-exists --topic '{topic_name}'",
+            f"printf '1\\n2\\n3\\n4\\n5\\n' | /opt/msk/produce.sh '{brokers}' '{topic_name}'",
+            f"/opt/msk/consume.sh '{brokers}' '{topic_name}' --from-beginning --max-messages 5",
+        ]
+        yield from _stream_ssm_command(
+            ssm_client,
+            instance_id,
+            DocumentName="AWS-RunShellScript",
+            Parameters={"commands": commands},
+        )
+        yield "data: Test complete\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
