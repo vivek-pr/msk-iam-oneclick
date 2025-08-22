@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>MSK OneClick</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="icon" href="/static/logo.svg">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css">
+  </head>
+  <body>
+    <nav class="navbar navbar-light bg-light mb-3">
+      <div class="container-fluid">
+        <a class="navbar-brand" href="#">
+          <img src="/static/logo.svg" alt="logo" width="30" height="30" class="d-inline-block align-text-top">
+          MSK OneClick
+        </a>
+      </div>
+    </nav>
+    <div class="container">
+      <ul class="nav nav-tabs" id="mainTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+          <button class="nav-link active" id="session-tab" data-bs-toggle="tab" data-bs-target="#session" type="button" role="tab">Session / Profiles</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="deploy-tab" data-bs-toggle="tab" data-bs-target="#deploy" type="button" role="tab">Deploy Infra</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="test-tab" data-bs-toggle="tab" data-bs-target="#test" type="button" role="tab">Test Infra</button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button class="nav-link" id="teardown-tab" data-bs-toggle="tab" data-bs-target="#teardown" type="button" role="tab">Teardown Infra</button>
+        </li>
+      </ul>
+      <div class="tab-content mt-3" id="tabContent">
+        <div class="tab-pane fade show active" id="session" role="tabpanel">
+          <div class="mb-3">
+            <button class="btn btn-secondary" id="fetch-profiles">Fetch AWS profiles</button>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Profiles</label>
+            <select class="form-select" id="profile-select"></select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Region</label>
+            <input class="form-control" id="region-input" value="ap-south-1">
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Stack Name</label>
+            <input class="form-control" id="stack-input" value="msk-iam-oneclick">
+          </div>
+          <button class="btn btn-primary" id="save-session">Save Session</button>
+        </div>
+        <div class="tab-pane fade" id="deploy" role="tabpanel">
+          <form id="deploy-form" class="mb-3">
+            <div class="mb-3">
+              <label class="form-label">Profile</label>
+              <select class="form-select" id="deploy-profile"></select>
+            </div>
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="use-serverless" checked>
+              <label class="form-check-label" for="use-serverless">UseServerless</label>
+            </div>
+            <div class="form-check form-switch mb-2">
+              <input class="form-check-input" type="checkbox" id="create-nat">
+              <label class="form-check-label" for="create-nat">CreateNAT</label>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Topic Name</label>
+              <input class="form-control" id="deploy-topic" value="poc-topic">
+            </div>
+            <button class="btn btn-primary" type="submit">Deploy</button>
+          </form>
+          <pre id="deploy-log" class="bg-light p-2 border" style="height:200px; overflow:auto"></pre>
+          <div id="deploy-out" class="mt-3"></div>
+        </div>
+        <div class="tab-pane fade" id="test" role="tabpanel">
+          <form id="test-form" class="mb-3">
+            <div class="mb-3">
+              <label class="form-label">Profile</label>
+              <select class="form-select" id="test-profile"></select>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Topic Name</label>
+              <input class="form-control" id="test-topic" value="poc-topic">
+            </div>
+            <button class="btn btn-primary" type="submit">Run test</button>
+          </form>
+          <pre id="test-log" class="bg-light p-2 border" style="height:200px; overflow:auto"></pre>
+          <table class="table mt-3" id="test-table"></table>
+        </div>
+        <div class="tab-pane fade" id="teardown" role="tabpanel">
+          <form id="teardown-form" class="mb-3">
+            <div class="mb-3">
+              <label class="form-label">Profile</label>
+              <select class="form-select" id="teardown-profile"></select>
+            </div>
+            <button class="btn btn-danger" type="submit">Delete stack</button>
+          </form>
+          <pre id="teardown-log" class="bg-light p-2 border" style="height:200px; overflow:auto"></pre>
+        </div>
+      </div>
+    </div>
+    <div class="position-fixed top-0 end-0 p-3" style="z-index: 11">
+      <div id="toast" class="toast text-bg-danger border-0" role="alert">
+        <div class="d-flex">
+          <div class="toast-body"></div>
+          <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      const toastEl = document.getElementById('toast');
+      const toast = new bootstrap.Toast(toastEl);
+      function showError(msg){ toastEl.querySelector('.toast-body').textContent = msg; toast.show(); }
+      let profiles = [];
+      async function fetchProfiles(){
+        const res = await fetch('/api/profiles');
+        const data = await res.json();
+        profiles = data.profiles;
+        const selects = [document.getElementById('profile-select'), document.getElementById('deploy-profile'), document.getElementById('test-profile'), document.getElementById('teardown-profile')];
+        selects.forEach(sel => { sel.innerHTML = ''; profiles.forEach(p => { const o=document.createElement('option'); o.value=p; o.textContent=p; sel.appendChild(o); }); });
+        const sess = await (await fetch('/api/session')).json();
+        selects.forEach(sel => { if(sess.profile) sel.value = sess.profile; });
+        document.getElementById('region-input').value = sess.region;
+        document.getElementById('stack-input').value = sess.stack_name;
+      }
+      document.getElementById('fetch-profiles').addEventListener('click', fetchProfiles);
+      document.getElementById('save-session').addEventListener('click', async () => {
+        const profile = document.getElementById('profile-select').value;
+        const region = document.getElementById('region-input').value;
+        const stack = document.getElementById('stack-input').value;
+        if(!profile){ showError('Select a profile'); return; }
+        const res = await fetch('/api/session', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({profile, region, stack_name:stack})});
+        if(!res.ok){ showError('Failed to save session'); }
+      });
+
+      async function startOp(url, data, logEl, onDone){
+        const res = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data)});
+        if(!res.ok){ showError('Request failed'); return; }
+        const {op_id} = await res.json();
+        let since = 0; let delay = 2000;
+        async function poll(){
+          const r = await fetch(`/api/op/${op_id}?since=${since}`);
+          if(!r.ok){ showError('Poll failed'); return; }
+          const j = await r.json();
+          since = j.cursor;
+          j.logs.forEach(line => { logEl.textContent += line + '\n'; logEl.scrollTop = logEl.scrollHeight; });
+          if(j.status === 'RUNNING' || j.status === 'QUEUED'){
+            setTimeout(poll, delay);
+            delay = Math.min(delay * 1.25, 5000);
+          }else if(j.status === 'SUCCEEDED'){
+            if(onDone) onDone(j.outputs);
+          }else{
+            showError(j.error?.message || 'Operation failed');
+          }
+        }
+        poll();
+      }
+
+      document.getElementById('deploy-form').addEventListener('submit', e => {
+        e.preventDefault();
+        const profile = document.getElementById('deploy-profile').value;
+        const useServerless = document.getElementById('use-serverless').checked;
+        const createNat = document.getElementById('create-nat').checked;
+        const topic = document.getElementById('deploy-topic').value;
+        const logEl = document.getElementById('deploy-log'); logEl.textContent='';
+        startOp('/api/deploy', {profile, UseServerless:useServerless, CreateNAT:createNat, TopicName:topic}, logEl, outputs => {
+          const out = document.getElementById('deploy-out');
+          out.innerHTML = `<div class="card"><div class="card-body"><div>ClusterArn: ${outputs.ClusterArn}</div><div>BootstrapBrokers: ${outputs.BootstrapBrokers}</div><div>Ec2InstanceId: ${outputs.Ec2InstanceId}</div></div></div>`;
+        });
+      });
+
+      document.getElementById('test-form').addEventListener('submit', e => {
+        e.preventDefault();
+        const profile = document.getElementById('test-profile').value;
+        const topic = document.getElementById('test-topic').value;
+        const logEl = document.getElementById('test-log'); logEl.textContent='';
+        startOp('/api/test', {profile, TopicName:topic}, logEl, outputs => {
+          const table = document.getElementById('test-table');
+          table.innerHTML = '<tr><th>#</th><th>Message</th></tr>' + outputs.messages.map((m,i)=>`<tr><td>${i+1}</td><td>${m}</td></tr>`).join('');
+        });
+      });
+
+      document.getElementById('teardown-form').addEventListener('submit', e => {
+        e.preventDefault();
+        const profile = document.getElementById('teardown-profile').value;
+        const sessStack = document.getElementById('stack-input').value;
+        const confirmName = prompt('Type stack name to confirm deletion');
+        if(confirmName !== sessStack){ showError('Stack name mismatch'); return; }
+        const logEl = document.getElementById('teardown-log'); logEl.textContent='';
+        startOp('/api/teardown', {profile}, logEl);
+      });
+
+      // initial load
+      fetchProfiles();
+    </script>
+  </body>
+</html>
