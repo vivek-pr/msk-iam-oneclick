@@ -3,14 +3,16 @@
 from pathlib import Path
 import json
 import time
+from threading import Lock
 
 import boto3
 from botocore.exceptions import ProfileNotFound, NoCredentialsError, ClientError
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 
 app = FastAPI()
 TEMPLATES = Path(__file__).parent / "templates"
+OPERATION_LOCK = Lock()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -70,13 +72,20 @@ def _wait_for_stack(cf_client, name: str):
     """Yield stack events until the stack completes or fails."""
     seen = set()
     while True:
-        events = cf_client.describe_stack_events(StackName=name)["StackEvents"]
+        try:
+            events = cf_client.describe_stack_events(StackName=name)["StackEvents"]
+        except cf_client.exceptions.ClientError:
+            yield f"data: {name} DELETE_COMPLETE\n\n"
+            break
         new_events = [e for e in events if e["EventId"] not in seen]
         for event in reversed(new_events):
             msg = f"{name} {event['ResourceStatus']} {event.get('LogicalResourceId', '')}"
             seen.add(event["EventId"])
             yield f"data: {msg}\n\n"
-        status = cf_client.describe_stacks(StackName=name)["Stacks"][0]["StackStatus"]
+        try:
+            status = cf_client.describe_stacks(StackName=name)["Stacks"][0]["StackStatus"]
+        except cf_client.exceptions.ClientError:
+            status = "DELETE_COMPLETE"
         if status.endswith("_COMPLETE") or status.endswith("_FAILED"):
             break
         time.sleep(5)
@@ -163,53 +172,101 @@ async def deploy(
     stack_name: str = Form(...),
 ):
     """Deploy VPC, MSK, EC2, and SSM stacks and stream progress events."""
-    session = boto3.Session(profile_name=profile, region_name=region)
-    cf = session.client("cloudformation")
+    if not OPERATION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another operation is in progress")
+    try:
+        session = boto3.Session(profile_name=profile, region_name=region)
+        cf = session.client("cloudformation")
 
-    vpc_template = Path("vpc.yml").read_text()
-    msk_template = Path("msk.yml").read_text()
-    ec2_template = Path("ec2.yml").read_text()
-    ssm_template = Path("ssm.yml").read_text()
+        vpc_template = Path("vpc.yml").read_text()
+        msk_template = Path("msk.yml").read_text()
+        ec2_template = Path("ec2.yml").read_text()
+        ssm_template = Path("ssm.yml").read_text()
+    except Exception:
+        OPERATION_LOCK.release()
+        raise
 
     def event_stream():
-        # VPC stack
-        vpc_stack = f"{stack_name}-vpc"
-        yield from _deploy_stack(cf, vpc_stack, vpc_template)
-        vpc_outputs = _stack_outputs(cf, vpc_stack)
+        try:
+            # VPC stack
+            vpc_stack = f"{stack_name}-vpc"
+            yield from _deploy_stack(cf, vpc_stack, vpc_template)
+            vpc_outputs = _stack_outputs(cf, vpc_stack)
 
-        # MSK stack
-        msk_stack = f"{stack_name}-msk"
-        msk_params = [
-            {"ParameterKey": "MskSubnetIds", "ParameterValue": vpc_outputs.get("MskSubnetIds", "")},
-            {"ParameterKey": "MskSecurityGroupId", "ParameterValue": vpc_outputs.get("MskSecurityGroupId", "")},
-        ]
-        yield from _deploy_stack(cf, msk_stack, msk_template, msk_params)
-        msk_outputs = _stack_outputs(cf, msk_stack)
+            # MSK stack
+            msk_stack = f"{stack_name}-msk"
+            msk_params = [
+                {"ParameterKey": "MskSubnetIds", "ParameterValue": vpc_outputs.get("MskSubnetIds", "")},
+                {"ParameterKey": "MskSecurityGroupId", "ParameterValue": vpc_outputs.get("MskSecurityGroupId", "")},
+            ]
+            yield from _deploy_stack(cf, msk_stack, msk_template, msk_params)
+            msk_outputs = _stack_outputs(cf, msk_stack)
 
-        # EC2 stack
-        ec2_stack = f"{stack_name}-ec2"
-        ec2_params = [
-            {"ParameterKey": "Ec2SubnetId", "ParameterValue": vpc_outputs.get("Ec2SubnetId", "")},
-            {"ParameterKey": "Ec2SecurityGroupId", "ParameterValue": vpc_outputs.get("Ec2SecurityGroupId", "")},
-            {"ParameterKey": "MskClusterArn", "ParameterValue": msk_outputs.get("MskClusterArn", "")},
-        ]
-        yield from _deploy_stack(cf, ec2_stack, ec2_template, ec2_params)
-        ec2_outputs = _stack_outputs(cf, ec2_stack)
+            # EC2 stack
+            ec2_stack = f"{stack_name}-ec2"
+            ec2_params = [
+                {"ParameterKey": "Ec2SubnetId", "ParameterValue": vpc_outputs.get("Ec2SubnetId", "")},
+                {"ParameterKey": "Ec2SecurityGroupId", "ParameterValue": vpc_outputs.get("Ec2SecurityGroupId", "")},
+                {"ParameterKey": "MskClusterArn", "ParameterValue": msk_outputs.get("MskClusterArn", "")},
+            ]
+            yield from _deploy_stack(cf, ec2_stack, ec2_template, ec2_params)
+            ec2_outputs = _stack_outputs(cf, ec2_stack)
 
-        # SSM document
-        ssm_stack = f"{stack_name}-ssm"
-        yield from _deploy_stack(cf, ssm_stack, ssm_template)
+            # SSM document
+            ssm_stack = f"{stack_name}-ssm"
+            yield from _deploy_stack(cf, ssm_stack, ssm_template)
 
-        outputs = {
-            "VpcId": vpc_outputs.get("VpcId", ""),
-            "MskClusterArn": msk_outputs.get("MskClusterArn", ""),
-            "Ec2InstanceId": ec2_outputs.get("Ec2InstanceId", ""),
-        }
-        yield f"data: Outputs: {json.dumps(outputs)}\n\n"
-        yield "data: Deployment complete\n\n"
+            outputs = {
+                "VpcId": vpc_outputs.get("VpcId", ""),
+                "MskClusterArn": msk_outputs.get("MskClusterArn", ""),
+                "Ec2InstanceId": ec2_outputs.get("Ec2InstanceId", ""),
+            }
+            yield f"data: Outputs: {json.dumps(outputs)}\n\n"
+            yield "data: Deployment complete\n\n"
+        finally:
+            OPERATION_LOCK.release()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
+
+@app.get("/teardown", response_class=HTMLResponse)
+async def teardown_form() -> HTMLResponse:
+    """Render the teardown form."""
+    html = (TEMPLATES / "teardown.html").read_text()
+    return HTMLResponse(content=html)
+
+
+@app.post("/teardown")
+async def teardown(
+    profile: str = Form(...),
+    region: str = Form(...),
+    stack_name: str = Form(...),
+):
+    """Delete CloudFormation stacks in reverse order and stream events."""
+    if not OPERATION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another operation is in progress")
+    try:
+        session = boto3.Session(profile_name=profile, region_name=region)
+        cf = session.client("cloudformation")
+    except Exception:
+        OPERATION_LOCK.release()
+        raise
+
+    def event_stream():
+        try:
+            for suffix in ["ssm", "ec2", "msk", "vpc"]:
+                stack = f"{stack_name}-{suffix}"
+                if not _stack_exists(cf, stack):
+                    yield f"data: Stack {stack} not found\n\n"
+                    continue
+                yield f"data: Deleting {stack}\n\n"
+                cf.delete_stack(StackName=stack)
+                yield from _wait_for_stack(cf, stack)
+            yield "data: Teardown complete\n\n"
+        finally:
+            OPERATION_LOCK.release()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.get("/test", response_class=HTMLResponse)
 async def test_form() -> HTMLResponse:
@@ -226,44 +283,53 @@ async def test(
     topic_name: str = Form(...),
 ):
     """Run a produce/consume test against the MSK cluster via SSM."""
-    session = boto3.Session(profile_name=profile, region_name=region)
-    cf = session.client("cloudformation")
-    kafka_client = session.client("kafka")
-    ssm_client = session.client("ssm")
+    if not OPERATION_LOCK.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Another operation is in progress")
+    try:
+        session = boto3.Session(profile_name=profile, region_name=region)
+        cf = session.client("cloudformation")
+        kafka_client = session.client("kafka")
+        ssm_client = session.client("ssm")
 
-    msk_stack = f"{stack_name}-msk"
-    ec2_stack = f"{stack_name}-ec2"
-    msk_outputs = _stack_outputs(cf, msk_stack)
-    ec2_outputs = _stack_outputs(cf, ec2_stack)
-    cluster_arn = msk_outputs.get("MskClusterArn", "")
-    instance_id = ec2_outputs.get("Ec2InstanceId", "")
+        msk_stack = f"{stack_name}-msk"
+        ec2_stack = f"{stack_name}-ec2"
+        msk_outputs = _stack_outputs(cf, msk_stack)
+        ec2_outputs = _stack_outputs(cf, ec2_stack)
+        cluster_arn = msk_outputs.get("MskClusterArn", "")
+        instance_id = ec2_outputs.get("Ec2InstanceId", "")
+    except Exception:
+        OPERATION_LOCK.release()
+        raise
 
     def event_stream():
-        yield "data: Running setup document\n\n"
-        yield from _stream_ssm_command(
-            ssm_client,
-            instance_id,
-            DocumentName="MskClientSetupDocument",
-        )
+        try:
+            yield "data: Running setup document\n\n"
+            yield from _stream_ssm_command(
+                ssm_client,
+                instance_id,
+                DocumentName="MskClientSetupDocument",
+            )
 
-        yield "data: Fetching bootstrap brokers\n\n"
-        brokers = kafka_client.get_bootstrap_brokers(ClusterArn=cluster_arn)[
-            "BootstrapBrokerStringSaslIam"
-        ]
-        yield f"data: Brokers: {brokers}\n\n"
+            yield "data: Fetching bootstrap brokers\n\n"
+            brokers = kafka_client.get_bootstrap_brokers(ClusterArn=cluster_arn)[
+                "BootstrapBrokerStringSaslIam"
+            ]
+            yield f"data: Brokers: {brokers}\n\n"
 
-        commands = [
-            f"/opt/kafka/bin/kafka-topics.sh --bootstrap-server '{brokers}' --command-config /opt/msk/client.properties --create --if-not-exists --topic '{topic_name}'",
-            f"printf '1\\n2\\n3\\n4\\n5\\n' | /opt/msk/produce.sh '{brokers}' '{topic_name}'",
-            f"/opt/msk/consume.sh '{brokers}' '{topic_name}' --from-beginning --max-messages 5",
-        ]
-        yield from _stream_ssm_command(
-            ssm_client,
-            instance_id,
-            DocumentName="AWS-RunShellScript",
-            Parameters={"commands": commands},
-        )
-        yield "data: Test complete\n\n"
+            commands = [
+                f"/opt/kafka/bin/kafka-topics.sh --bootstrap-server '{brokers}' --command-config /opt/msk/client.properties --create --if-not-exists --topic '{topic_name}'",
+                f"printf '1\\n2\\n3\\n4\\n5\\n' | /opt/msk/produce.sh '{brokers}' '{topic_name}'",
+                f"/opt/msk/consume.sh '{brokers}' '{topic_name}' --from-beginning --max-messages 5",
+            ]
+            yield from _stream_ssm_command(
+                ssm_client,
+                instance_id,
+                DocumentName="AWS-RunShellScript",
+                Parameters={"commands": commands},
+            )
+            yield "data: Test complete\n\n"
+        finally:
+            OPERATION_LOCK.release()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
