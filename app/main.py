@@ -1,335 +1,228 @@
-"""FastAPI application offering a basic session check and stack deployment UI."""
+"""FastAPI application for MSK OneClick demo with long-polling operations."""
 
-from pathlib import Path
-import json
+from __future__ import annotations
+
+import configparser
+import threading
 import time
-from threading import Lock
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional
 
-import boto3
-from botocore.exceptions import ProfileNotFound, NoCredentialsError, ClientError
-from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.sessions import SessionMiddleware
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
-app = FastAPI()
+app = FastAPI(title="MSK OneClick")
+app.add_middleware(SessionMiddleware, secret_key="change-me")
 TEMPLATES = Path(__file__).parent / "templates"
-OPERATION_LOCK = Lock()
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+
+@dataclass
+class Operation:
+    """Track state for a long running operation."""
+
+    status: str = "QUEUED"
+    progress: int = 0
+    logs: List[str] = field(default_factory=list)
+    outputs: Dict[str, str] = field(default_factory=dict)
+    error: Optional[Dict[str, str]] = None
+    created: float = field(default_factory=time.time)
+
+
+OPERATIONS: Dict[str, Operation] = {}
+OPERATIONS_LOCK = threading.Lock()
+TTL_SECONDS = 30 * 60
+
+
+def _cleanup_operations() -> None:
+    now = time.time()
+    with OPERATIONS_LOCK:
+        to_delete = [oid for oid, op in OPERATIONS.items() if now - op.created > TTL_SECONDS]
+        for oid in to_delete:
+            del OPERATIONS[oid]
 
 
 @app.get("/", response_class=HTMLResponse)
-async def read_root() -> HTMLResponse:
-    """Return a simple HTML form for AWS session parameters."""
-    html = (TEMPLATES / "session.html").read_text()
-    return HTMLResponse(content=html)
-
-@app.post("/", response_class=HTMLResponse)
-async def create_session(
-    profile: str = Form(...),
-    region: str = Form(...),
-    stack_name: str = Form(...),
-    feature: bool = Form(False),
-) -> HTMLResponse:
-    """Create a boto3 session based on form input and display result."""
-    try:
-        session = boto3.Session(profile_name=profile, region_name=region)
-        # Trigger a call to ensure session is valid
-        sts = session.client("sts")
-        identity = sts.get_caller_identity()
-        message = (
-            f"Created session for {identity['Arn']}<br>"
-            f"Stack: {stack_name}<br>"
-            f"Feature enabled: {feature}"
-        )
-        return HTMLResponse(content=message)
-    except ProfileNotFound:
-        return HTMLResponse(content="Profile not found", status_code=400)
-    except (NoCredentialsError, ClientError) as exc:
-        return HTMLResponse(content=f"Credentials error: {exc}", status_code=400)
-    except Exception as exc:  # pragma: no cover - unexpected errors
-        return HTMLResponse(content=f"Unexpected error: {exc}", status_code=500)
-
-
-# ---------------------------------------------------------------------------
-# One-click deployment UI and handlers
-
-
-@app.get("/deploy", response_class=HTMLResponse)
-async def deploy_form() -> HTMLResponse:
-    """Render the stack deployment form using Bootstrap."""
-    html = (TEMPLATES / "deploy.html").read_text()
+async def index() -> HTMLResponse:
+    """Serve the main tabbed interface."""
+    html = (TEMPLATES / "index.html").read_text()
     return HTMLResponse(content=html)
 
 
-def _stack_exists(cf_client, name: str) -> bool:
-    """Return True if the stack exists in CloudFormation."""
-    try:
-        cf_client.describe_stacks(StackName=name)
-        return True
-    except cf_client.exceptions.ClientError:
-        return False
+@app.get("/api/profiles")
+def api_profiles() -> Dict[str, object]:
+    """Return configured AWS profiles from credentials and config files."""
+    cred_cfg = configparser.ConfigParser()
+    cred_cfg.read(Path.home() / ".aws" / "credentials")
+    conf_cfg = configparser.ConfigParser()
+    conf_cfg.read(Path.home() / ".aws" / "config")
+
+    profiles = set(cred_cfg.sections())
+    for section in conf_cfg.sections():
+        name = section.replace("profile ", "") if section.startswith("profile ") else section
+        profiles.add(name)
+    default = "default" if "default" in profiles else None
+    return {"profiles": sorted(profiles), "default": default}
 
 
-def _wait_for_stack(cf_client, name: str):
-    """Yield stack events until the stack completes or fails."""
-    seen = set()
-    while True:
+@app.get("/api/session")
+def get_session(request: Request) -> Dict[str, Optional[str]]:
+    """Return session information."""
+    return {
+        "profile": request.session.get("profile"),
+        "region": request.session.get("region", "ap-south-1"),
+        "stack_name": request.session.get("stack_name", "msk-iam-oneclick"),
+    }
+
+
+@app.post("/api/session")
+async def set_session(request: Request) -> Dict[str, bool]:
+    """Persist profile/region/stack in a server side session."""
+    data = await request.json()
+    profile = data.get("profile")
+    region = data.get("region")
+    stack = data.get("stack_name")
+    if not profile:
+        raise HTTPException(status_code=400, detail="profile required")
+    request.session["profile"] = profile
+    request.session["region"] = region or "ap-south-1"
+    request.session["stack_name"] = stack or "msk-iam-oneclick"
+    return {"ok": True}
+
+
+def _register_operation(fn) -> str:
+    op_id = str(uuid.uuid4())
+    op = Operation(status="RUNNING", progress=0)
+    with OPERATIONS_LOCK:
+        OPERATIONS[op_id] = op
+    thread = threading.Thread(target=fn, args=(op,), daemon=True)
+    thread.start()
+    return op_id
+
+
+@app.post("/api/deploy")
+async def api_deploy(request: Request) -> Dict[str, str]:
+    """Simulate infrastructure deployment."""
+    if "profile" not in request.session:
+        raise HTTPException(status_code=400, detail="session not initialised")
+    data = await request.json()
+
+    def runner(op: Operation) -> None:
         try:
-            events = cf_client.describe_stack_events(StackName=name)["StackEvents"]
-        except cf_client.exceptions.ClientError:
-            yield f"data: {name} DELETE_COMPLETE\n\n"
-            break
-        new_events = [e for e in events if e["EventId"] not in seen]
-        for event in reversed(new_events):
-            msg = f"{name} {event['ResourceStatus']} {event.get('LogicalResourceId', '')}"
-            seen.add(event["EventId"])
-            yield f"data: {msg}\n\n"
-        try:
-            status = cf_client.describe_stacks(StackName=name)["Stacks"][0]["StackStatus"]
-        except cf_client.exceptions.ClientError:
-            status = "DELETE_COMPLETE"
-        if status.endswith("_COMPLETE") or status.endswith("_FAILED"):
-            break
-        time.sleep(5)
-
-
-def _deploy_stack(cf_client, name: str, template: str, parameters=None):
-    """Create or update a CloudFormation stack and stream its events."""
-    params = parameters or []
-    capabilities = ["CAPABILITY_NAMED_IAM", "CAPABILITY_IAM"]
-    if _stack_exists(cf_client, name):
-        change_set = f"{name}-changes"
-        yield f"data: Updating {name}\n\n"
-        cf_client.create_change_set(
-            StackName=name,
-            ChangeSetName=change_set,
-            TemplateBody=template,
-            Parameters=params,
-            Capabilities=capabilities,
-        )
-        while True:
-            desc = cf_client.describe_change_set(StackName=name, ChangeSetName=change_set)
-            status = desc["Status"]
-            if status in ("CREATE_COMPLETE", "FAILED"):
-                break
-            time.sleep(5)
-        if status == "FAILED":
-            yield f"data: No changes for {name}\n\n"
-            cf_client.delete_change_set(StackName=name, ChangeSetName=change_set)
-            return
-        cf_client.execute_change_set(StackName=name, ChangeSetName=change_set)
-    else:
-        yield f"data: Creating {name}\n\n"
-        cf_client.create_stack(
-            StackName=name,
-            TemplateBody=template,
-            Parameters=params,
-            Capabilities=capabilities,
-        )
-    yield from _wait_for_stack(cf_client, name)
-
-
-def _stack_outputs(cf_client, name: str) -> dict:
-    """Return stack outputs as a simple dictionary."""
-    resp = cf_client.describe_stacks(StackName=name)
-    outputs = {}
-    for out in resp["Stacks"][0].get("Outputs", []):
-        outputs[out["OutputKey"]] = out["OutputValue"]
-    return outputs
-
-
-def _stream_ssm_command(ssm_client, instance_id: str, **kwargs):
-    """Send an SSM command and yield its output as SSE data lines."""
-    resp = ssm_client.send_command(InstanceIds=[instance_id], **kwargs)
-    command_id = resp["Command"]["CommandId"]
-    stdout_len = 0
-    stderr_len = 0
-    while True:
-        time.sleep(2)
-        invocation = ssm_client.get_command_invocation(
-            CommandId=command_id,
-            InstanceId=instance_id,
-            PluginName="aws:runShellScript",
-        )
-        stdout = invocation.get("StandardOutputContent", "")
-        stderr = invocation.get("StandardErrorContent", "")
-        if stdout_len < len(stdout):
-            for line in stdout[stdout_len:].splitlines():
-                yield f"data: {line}\n\n"
-            stdout_len = len(stdout)
-        if stderr_len < len(stderr):
-            for line in stderr[stderr_len:].splitlines():
-                yield f"data: {line}\n\n"
-            stderr_len = len(stderr)
-        status = invocation["Status"]
-        if status not in ("Pending", "InProgress", "Delayed"):
-            yield f"data: {status}\n\n"
-            break
-
-
-@app.post("/deploy")
-async def deploy(
-    profile: str = Form(...),
-    region: str = Form(...),
-    stack_name: str = Form(...),
-):
-    """Deploy VPC, MSK, EC2, and SSM stacks and stream progress events."""
-    if not OPERATION_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another operation is in progress")
-    try:
-        session = boto3.Session(profile_name=profile, region_name=region)
-        cf = session.client("cloudformation")
-
-        vpc_template = Path("vpc.yml").read_text()
-        msk_template = Path("msk.yml").read_text()
-        ec2_template = Path("ec2.yml").read_text()
-        ssm_template = Path("ssm.yml").read_text()
-    except Exception:
-        OPERATION_LOCK.release()
-        raise
-
-    def event_stream():
-        try:
-            # VPC stack
-            vpc_stack = f"{stack_name}-vpc"
-            yield from _deploy_stack(cf, vpc_stack, vpc_template)
-            vpc_outputs = _stack_outputs(cf, vpc_stack)
-
-            # MSK stack
-            msk_stack = f"{stack_name}-msk"
-            msk_params = [
-                {"ParameterKey": "MskSubnetIds", "ParameterValue": vpc_outputs.get("MskSubnetIds", "")},
-                {"ParameterKey": "MskSecurityGroupId", "ParameterValue": vpc_outputs.get("MskSecurityGroupId", "")},
+            steps = [
+                ("Starting deployment", 5),
+                ("Creating VPC", 25),
+                ("Creating MSK cluster", 60),
+                ("Launching EC2", 80),
+                ("Finalising", 95),
             ]
-            yield from _deploy_stack(cf, msk_stack, msk_template, msk_params)
-            msk_outputs = _stack_outputs(cf, msk_stack)
-
-            # EC2 stack
-            ec2_stack = f"{stack_name}-ec2"
-            ec2_params = [
-                {"ParameterKey": "Ec2SubnetId", "ParameterValue": vpc_outputs.get("Ec2SubnetId", "")},
-                {"ParameterKey": "Ec2SecurityGroupId", "ParameterValue": vpc_outputs.get("Ec2SecurityGroupId", "")},
-                {"ParameterKey": "MskClusterArn", "ParameterValue": msk_outputs.get("MskClusterArn", "")},
-            ]
-            yield from _deploy_stack(cf, ec2_stack, ec2_template, ec2_params)
-            ec2_outputs = _stack_outputs(cf, ec2_stack)
-
-            # SSM document
-            ssm_stack = f"{stack_name}-ssm"
-            yield from _deploy_stack(cf, ssm_stack, ssm_template)
-
-            outputs = {
-                "VpcId": vpc_outputs.get("VpcId", ""),
-                "MskClusterArn": msk_outputs.get("MskClusterArn", ""),
-                "Ec2InstanceId": ec2_outputs.get("Ec2InstanceId", ""),
+            for msg, prog in steps:
+                op.logs.append(msg)
+                op.progress = prog
+                time.sleep(1)
+            op.outputs = {
+                "ClusterArn": "arn:aws:kafka:region:acct:cluster/demo/123",
+                "BootstrapBrokers": "b-1.example:9098,b-2.example:9098",
+                "Ec2InstanceId": "i-0123456789abcdef0",
             }
-            yield f"data: Outputs: {json.dumps(outputs)}\n\n"
-            yield "data: Deployment complete\n\n"
-        finally:
-            OPERATION_LOCK.release()
+            op.logs.append("Deployment complete")
+            op.progress = 100
+            op.status = "SUCCEEDED"
+        except Exception as exc:  # pragma: no cover - simulation should not fail
+            op.logs.append(f"Error: {exc}")
+            op.error = {"message": str(exc)}
+            op.status = "FAILED"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
-@app.get("/teardown", response_class=HTMLResponse)
-async def teardown_form() -> HTMLResponse:
-    """Render the teardown form."""
-    html = (TEMPLATES / "teardown.html").read_text()
-    return HTMLResponse(content=html)
+    op_id = _register_operation(runner)
+    return {"op_id": op_id}
 
 
-@app.post("/teardown")
-async def teardown(
-    profile: str = Form(...),
-    region: str = Form(...),
-    stack_name: str = Form(...),
-):
-    """Delete CloudFormation stacks in reverse order and stream events."""
-    if not OPERATION_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another operation is in progress")
-    try:
-        session = boto3.Session(profile_name=profile, region_name=region)
-        cf = session.client("cloudformation")
-    except Exception:
-        OPERATION_LOCK.release()
-        raise
+@app.post("/api/test")
+async def api_test(request: Request) -> Dict[str, str]:
+    """Simulate produce/consume test."""
+    if "profile" not in request.session:
+        raise HTTPException(status_code=400, detail="session not initialised")
+    data = await request.json()
+    topic = data.get("TopicName", "poc-topic")
 
-    def event_stream():
+    def runner(op: Operation) -> None:
         try:
-            for suffix in ["ssm", "ec2", "msk", "vpc"]:
-                stack = f"{stack_name}-{suffix}"
-                if not _stack_exists(cf, stack):
-                    yield f"data: Stack {stack} not found\n\n"
-                    continue
-                yield f"data: Deleting {stack}\n\n"
-                cf.delete_stack(StackName=stack)
-                yield from _wait_for_stack(cf, stack)
-            yield "data: Teardown complete\n\n"
-        finally:
-            OPERATION_LOCK.release()
+            steps = [
+                ("Running setup", 20),
+                ("Producing messages", 60),
+                ("Consuming messages", 90),
+            ]
+            for msg, prog in steps:
+                op.logs.append(msg)
+                op.progress = prog
+                time.sleep(1)
+            messages = ["1", "2", "3", "4", "5"]
+            op.outputs = {"messages": messages, "topic": topic}
+            op.logs.append("Test complete")
+            op.progress = 100
+            op.status = "SUCCEEDED"
+        except Exception as exc:  # pragma: no cover
+            op.logs.append(f"Error: {exc}")
+            op.error = {"message": str(exc)}
+            op.status = "FAILED"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-@app.get("/test", response_class=HTMLResponse)
-async def test_form() -> HTMLResponse:
-    """Render the produce/consume test form."""
-    html = (TEMPLATES / "test.html").read_text()
-    return HTMLResponse(content=html)
+    op_id = _register_operation(runner)
+    return {"op_id": op_id}
 
 
-@app.post("/test")
-async def test(
-    profile: str = Form(...),
-    region: str = Form(...),
-    stack_name: str = Form(...),
-    topic_name: str = Form(...),
-):
-    """Run a produce/consume test against the MSK cluster via SSM."""
-    if not OPERATION_LOCK.acquire(blocking=False):
-        raise HTTPException(status_code=409, detail="Another operation is in progress")
-    try:
-        session = boto3.Session(profile_name=profile, region_name=region)
-        cf = session.client("cloudformation")
-        kafka_client = session.client("kafka")
-        ssm_client = session.client("ssm")
+@app.post("/api/teardown")
+async def api_teardown(request: Request) -> Dict[str, str]:
+    """Simulate stack deletion."""
+    if "profile" not in request.session:
+        raise HTTPException(status_code=400, detail="session not initialised")
+    data = await request.json()
 
-        msk_stack = f"{stack_name}-msk"
-        ec2_stack = f"{stack_name}-ec2"
-        msk_outputs = _stack_outputs(cf, msk_stack)
-        ec2_outputs = _stack_outputs(cf, ec2_stack)
-        cluster_arn = msk_outputs.get("MskClusterArn", "")
-        instance_id = ec2_outputs.get("Ec2InstanceId", "")
-    except Exception:
-        OPERATION_LOCK.release()
-        raise
-
-    def event_stream():
+    def runner(op: Operation) -> None:
         try:
-            yield "data: Running setup document\n\n"
-            yield from _stream_ssm_command(
-                ssm_client,
-                instance_id,
-                DocumentName="MskClientSetupDocument",
-            )
-
-            yield "data: Fetching bootstrap brokers\n\n"
-            brokers = kafka_client.get_bootstrap_brokers(ClusterArn=cluster_arn)[
-                "BootstrapBrokerStringSaslIam"
+            steps = [
+                ("Deleting SSM", 20),
+                ("Deleting EC2", 50),
+                ("Deleting MSK", 80),
+                ("Deleting VPC", 95),
             ]
-            yield f"data: Brokers: {brokers}\n\n"
+            for msg, prog in steps:
+                op.logs.append(msg)
+                op.progress = prog
+                time.sleep(1)
+            op.logs.append("Teardown complete")
+            op.progress = 100
+            op.status = "SUCCEEDED"
+        except Exception as exc:  # pragma: no cover
+            op.logs.append(f"Error: {exc}")
+            op.error = {"message": str(exc)}
+            op.status = "FAILED"
 
-            commands = [
-                f"/opt/kafka/bin/kafka-topics.sh --bootstrap-server '{brokers}' --command-config /opt/msk/client.properties --create --if-not-exists --topic '{topic_name}'",
-                f"printf '1\\n2\\n3\\n4\\n5\\n' | /opt/msk/produce.sh '{brokers}' '{topic_name}'",
-                f"/opt/msk/consume.sh '{brokers}' '{topic_name}' --from-beginning --max-messages 5",
-            ]
-            yield from _stream_ssm_command(
-                ssm_client,
-                instance_id,
-                DocumentName="AWS-RunShellScript",
-                Parameters={"commands": commands},
-            )
-            yield "data: Test complete\n\n"
-        finally:
-            OPERATION_LOCK.release()
+    op_id = _register_operation(runner)
+    return {"op_id": op_id}
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+@app.get("/api/op/{op_id}")
+def api_operation(op_id: str, since: int = 0) -> Dict[str, object]:
+    """Return operation status and new logs since the given cursor."""
+    _cleanup_operations()
+    with OPERATIONS_LOCK:
+        op = OPERATIONS.get(op_id)
+    if not op:
+        raise HTTPException(status_code=404, detail="operation not found")
+    logs = op.logs[since:]
+    resp: Dict[str, object] = {
+        "status": op.status,
+        "progress": op.progress,
+        "logs": logs,
+        "cursor": since + len(logs),
+    }
+    if op.status == "SUCCEEDED" and op.outputs:
+        resp["outputs"] = op.outputs
+    if op.error:
+        resp["error"] = op.error
+    return resp
 
