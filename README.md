@@ -8,6 +8,12 @@ AWS profile, region, stack name, and a simple feature toggle. Submitting the
 form creates a `boto3.Session` using the provided profile and region and
 returns the caller identity or an error if the profile is missing or invalid.
 
+Additional pages provide one-click stack management:
+
+- `/deploy` – create or update the CloudFormation stacks
+- `/test` – run a simple produce/consume test against the cluster
+- `/teardown` – delete the stacks in reverse order
+
 Run locally with:
 
 ```bash
