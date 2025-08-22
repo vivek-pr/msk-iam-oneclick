@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Minimal EC2 client with IAM role for MSK and SSM access
+
+Parameters:
+  Ec2SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet ID for the EC2 client
+  Ec2SecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group ID for the EC2 client
+  MskClusterArn:
+    Type: String
+    Description: ARN of the MSK cluster for IAM policy
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+    Description: SSM parameter for the latest Amazon Linux 2023 AMI
+
+Resources:
+  Ec2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: MskAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kafka-cluster:Connect
+                  - kafka-cluster:DescribeCluster
+                  - kafka-cluster:DescribeTopic
+                  - kafka-cluster:CreateTopic
+                  - kafka-cluster:ReadData
+                  - kafka-cluster:WriteData
+                Resource: !Ref MskClusterArn
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref Ec2Role
+
+  Ec2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      SubnetId: !Ref Ec2SubnetId
+      SecurityGroupIds:
+        - !Ref Ec2SecurityGroupId
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-client'
+      UserData: !Base64 |
+        #!/bin/bash
+        set -e
+        mkdir -p /opt/msk
+        mkdir -p /opt/kafka
+
+Outputs:
+  Ec2InstanceId:
+    Value: !Ref Ec2Instance
+    Description: ID of the EC2 client instance
+  Ec2InstancePrivateIp:
+    Value: !GetAtt Ec2Instance.PrivateIp
+    Description: Private IP address of the EC2 client instance
