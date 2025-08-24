@@ -15,11 +15,11 @@ Parameters:
     Type: String
     Default: c2.kafka.us-east-1.amazonaws.com
     Description: Domain suffix for MSK broker hostnames (e.g., c2.kafka.us-east-1.amazonaws.com)
-  CreateTGW:
+  ExistingTransitGatewayId:
     Type: String
-    Default: 'true'
-    AllowedValues: ['true', 'false']
-    Description: Create Transit Gateway and related resources
+    Default: ''
+    AllowedPattern: '^$|^tgw-[0-9a-f]+$'
+    Description: Optional ID of an existing Transit Gateway (must be in the same Region)
   CreateResolver:
     Type: String
     Default: 'false'
@@ -28,7 +28,8 @@ Parameters:
 
 Conditions:
   CreateNATCondition: !Equals [!Ref CreateNAT, 'true']
-  CreateTGWCondition: !Equals [!Ref CreateTGW, 'true']
+  UseExistingTGW: !Not [!Equals [!Ref ExistingTransitGatewayId, '']]
+  CreateTGWCondition: !Equals [!Ref ExistingTransitGatewayId, '']
   CreateResolverCondition: !Equals [!Ref CreateResolver, 'true']
 
 Resources:
@@ -218,21 +219,18 @@ Resources:
 
   TransitGatewayRouteTable:
     Type: AWS::EC2::TransitGatewayRouteTable
-    Condition: CreateTGWCondition
     Properties:
-      TransitGatewayId: !Ref TransitGateway
+      TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-tgw-rt'
 
   TgwAttachmentApp:
     Type: AWS::EC2::TransitGatewayVpcAttachment
-    Condition: CreateTGWCondition
     DependsOn:
-      - TransitGateway
       - TransitGatewayRouteTable
     Properties:
-      TransitGatewayId: !Ref TransitGateway
+      TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
       VpcId: !Ref VPCAPP
       SubnetIds:
         - !Ref AppPrivateSubnet
@@ -247,12 +245,10 @@ Resources:
 
   TgwAttachmentMsk:
     Type: AWS::EC2::TransitGatewayVpcAttachment
-    Condition: CreateTGWCondition
     DependsOn:
-      - TransitGateway
       - TransitGatewayRouteTable
     Properties:
-      TransitGatewayId: !Ref TransitGateway
+      TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
       VpcId: !Ref VPCMSK
       SubnetIds:
         - !Ref MskSubnet1
@@ -267,35 +263,30 @@ Resources:
 
   TgwRouteTableAssociationApp:
     Type: AWS::EC2::TransitGatewayRouteTableAssociation
-    Condition: CreateTGWCondition
     Properties:
       TransitGatewayAttachmentId: !Ref TgwAttachmentApp
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
 
   TgwRouteTableAssociationMsk:
     Type: AWS::EC2::TransitGatewayRouteTableAssociation
-    Condition: CreateTGWCondition
     Properties:
       TransitGatewayAttachmentId: !Ref TgwAttachmentMsk
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
 
   TgwRouteTablePropagationApp:
     Type: AWS::EC2::TransitGatewayRouteTablePropagation
-    Condition: CreateTGWCondition
     Properties:
       TransitGatewayAttachmentId: !Ref TgwAttachmentApp
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
 
   TgwRouteTablePropagationMsk:
     Type: AWS::EC2::TransitGatewayRouteTablePropagation
-    Condition: CreateTGWCondition
     Properties:
       TransitGatewayAttachmentId: !Ref TgwAttachmentMsk
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
 
   TgwRouteApp:
     Type: AWS::EC2::TransitGatewayRoute
-    Condition: CreateTGWCondition
     Properties:
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
       DestinationCidrBlock: 10.1.0.0/22
@@ -303,7 +294,6 @@ Resources:
 
   TgwRouteMsk:
     Type: AWS::EC2::TransitGatewayRoute
-    Condition: CreateTGWCondition
     Properties:
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
       DestinationCidrBlock: 10.0.0.0/22
@@ -311,27 +301,24 @@ Resources:
 
   AppToMskTgwRoutePublic:
     Type: AWS::EC2::Route
-    Condition: CreateTGWCondition
     Properties:
       RouteTableId: !Ref AppPublicRouteTable
       DestinationCidrBlock: 10.0.0.0/22
-      TransitGatewayId: !Ref TransitGateway
+      TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
 
   AppToMskTgwRoutePrivate:
     Type: AWS::EC2::Route
-    Condition: CreateTGWCondition
     Properties:
       RouteTableId: !Ref AppPrivateRouteTable
       DestinationCidrBlock: 10.0.0.0/22
-      TransitGatewayId: !Ref TransitGateway
+      TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
 
   MskToAppTgwRoute:
     Type: AWS::EC2::Route
-    Condition: CreateTGWCondition
     Properties:
       RouteTableId: !Ref MskRouteTable
       DestinationCidrBlock: 10.1.0.0/22
-      TransitGatewayId: !Ref TransitGateway
+      TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
 
   ResolverOutboundSG:
     Type: AWS::EC2::SecurityGroup
@@ -491,3 +478,5 @@ Outputs:
     Value: !Ref EC2ClientSG
   MskSecurityGroupId:
     Value: !Ref MSKSG
+  TransitGatewayId:
+    Value: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]

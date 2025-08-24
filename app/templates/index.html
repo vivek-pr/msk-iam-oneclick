@@ -68,6 +68,11 @@
               <label class="form-check-label" for="create-nat">CreateNAT</label>
             </div>
             <div class="mb-3">
+              <label class="form-label">Existing Transit Gateway ID (optional)</label>
+              <input class="form-control" id="tgwId">
+              <div class="form-text">Leave blank to create a new TGW. Must be in the same Region.</div>
+            </div>
+            <div class="mb-3">
               <label class="form-label">Topic Name</label>
               <input class="form-control" id="deploy-topic" value="poc-topic">
             </div>
@@ -167,9 +172,12 @@
         const profile = document.getElementById('deploy-profile').value;
         const connectivity = document.getElementById('connectivity-select').value;
         const createNat = document.getElementById('create-nat').checked;
+        const tgwId = document.getElementById('tgwId').value.trim();
         const topic = document.getElementById('deploy-topic').value;
         const logEl = document.getElementById('deploy-log'); logEl.textContent='';
-        startOp('/api/deploy', {profile, Connectivity:connectivity, CreateNAT:createNat, TopicName:topic}, logEl, outputs => {
+        const payload = {profile, Connectivity:connectivity, CreateNAT:createNat, TopicName:topic};
+        if(tgwId) payload.ExistingTransitGatewayId = tgwId;
+        startOp('/api/deploy', payload, logEl, outputs => {
           const out = document.getElementById('deploy-out');
           out.innerHTML = `<div class="card"><div class="card-body"><div>ClusterArn: ${outputs.ClusterArn}</div><div>BootstrapBrokers: ${outputs.BootstrapBrokers}</div><div>Ec2InstanceId: ${outputs.Ec2InstanceId}</div></div></div>`;
         });
