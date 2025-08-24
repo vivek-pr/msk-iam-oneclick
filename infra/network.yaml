@@ -20,6 +20,11 @@ Parameters:
     Default: ''
     AllowedPattern: '^$|^tgw-[0-9a-f]+$'
     Description: Optional ID of an existing Transit Gateway (must be in the same Region)
+  TgwDefaultAssociationEnabled:
+    Type: String
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+    Description: Indicates if the Transit Gateway uses the default route table association
   CreateResolver:
     Type: String
     Default: 'false'
@@ -30,6 +35,7 @@ Conditions:
   CreateNATCondition: !Equals [!Ref CreateNAT, 'true']
   UseExistingTGW: !Not [!Equals [!Ref ExistingTransitGatewayId, '']]
   CreateTGWCondition: !Equals [!Ref ExistingTransitGatewayId, '']
+  CreateExplicitAssociation: !Equals [!Ref TgwDefaultAssociationEnabled, 'false']
   CreateResolverCondition: !Equals [!Ref CreateResolver, 'true']
 
 Resources:
@@ -211,8 +217,8 @@ Resources:
     Properties:
       AmazonSideAsn: 64512
       AutoAcceptSharedAttachments: enable
-      DefaultRouteTableAssociation: enable
-      DefaultRouteTablePropagation: enable
+      DefaultRouteTableAssociation: disable
+      DefaultRouteTablePropagation: disable
       DnsSupport: enable
       Tags:
         - Key: Name
@@ -270,12 +276,20 @@ Resources:
 
   TgwRouteTableAssociationApp:
     Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Condition: CreateExplicitAssociation
+    DependsOn:
+      - TransitGatewayRouteTable
+      - TgwAttachmentApp
     Properties:
       TransitGatewayAttachmentId: !Ref TgwAttachmentApp
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
 
   TgwRouteTableAssociationMsk:
     Type: AWS::EC2::TransitGatewayRouteTableAssociation
+    Condition: CreateExplicitAssociation
+    DependsOn:
+      - TransitGatewayRouteTable
+      - TgwAttachmentMsk
     Properties:
       TransitGatewayAttachmentId: !Ref TgwAttachmentMsk
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
