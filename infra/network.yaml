@@ -1,0 +1,246 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Networking for MSK IAM POC with cross-VPC peering
+
+Parameters:
+  CreateNAT:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Create NAT gateway and place EC2 in private subnet
+
+Conditions:
+  CreateNATCondition: !Equals [!Ref CreateNAT, 'true']
+
+Resources:
+  VPCMSK:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/22
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-msk-vpc'
+
+  VPCAPP:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/22
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app-vpc'
+
+  AppInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-igw'
+
+  AppVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPCAPP
+      InternetGatewayId: !Ref AppInternetGateway
+
+  AppPublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCAPP
+      CidrBlock: 10.1.0.0/26
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app-public-az0'
+
+  AppPrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCAPP
+      CidrBlock: 10.1.0.64/26
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app-private-az0'
+
+  AppPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCAPP
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app-public-rt'
+
+  AppPublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref AppInternetGateway
+
+  AppPublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref AppPublicRouteTable
+      SubnetId: !Ref AppPublicSubnet
+
+  AppPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCAPP
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app-private-rt'
+
+  AppPrivateRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateNATCondition
+    Properties:
+      RouteTableId: !Ref AppPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref AppNatGateway
+
+  AppPrivateSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref AppPrivateRouteTable
+      SubnetId: !Ref AppPrivateSubnet
+
+  AppNatEIP:
+    Type: AWS::EC2::EIP
+    Condition: CreateNATCondition
+    Properties:
+      Domain: vpc
+
+  AppNatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNATCondition
+    Properties:
+      AllocationId: !GetAtt AppNatEIP.AllocationId
+      SubnetId: !Ref AppPublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-nat'
+
+  MskSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCMSK
+      CidrBlock: 10.0.0.0/26
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-msk-private-az0'
+
+  MskSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCMSK
+      CidrBlock: 10.0.0.64/26
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-msk-private-az1'
+
+  MskRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCMSK
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-msk-private-rt'
+
+  MskSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref MskRouteTable
+      SubnetId: !Ref MskSubnet1
+
+  MskSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref MskRouteTable
+      SubnetId: !Ref MskSubnet2
+
+  VPCPeering:
+    Type: AWS::EC2::VPCPeeringConnection
+    Properties:
+      VpcId: !Ref VPCAPP
+      PeerVpcId: !Ref VPCMSK
+
+  VPCPeeringOptionsRequester:
+    Type: AWS::EC2::VPCPeeringConnectionOptions
+    Properties:
+      VpcPeeringConnectionId: !Ref VPCPeering
+      RequesterPeeringConnectionOptions:
+        AllowDnsResolutionFromRemoteVpc: true
+
+  VPCPeeringOptionsAccepter:
+    Type: AWS::EC2::VPCPeeringConnectionOptions
+    Properties:
+      VpcPeeringConnectionId: !Ref VPCPeering
+      AccepterPeeringConnectionOptions:
+        AllowDnsResolutionFromRemoteVpc: true
+
+  AppToMskRoutePublic:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppPublicRouteTable
+      DestinationCidrBlock: 10.0.0.0/22
+      VpcPeeringConnectionId: !Ref VPCPeering
+
+  AppToMskRoutePrivate:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppPrivateRouteTable
+      DestinationCidrBlock: 10.0.0.0/22
+      VpcPeeringConnectionId: !Ref VPCPeering
+
+  MskToAppRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref MskRouteTable
+      DestinationCidrBlock: 10.1.0.0/22
+      VpcPeeringConnectionId: !Ref VPCPeering
+
+  EC2ClientSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 client security group
+      VpcId: !Ref VPCAPP
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2-sg'
+
+  MSKSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: MSK broker security group
+      VpcId: !Ref VPCMSK
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 9098
+          ToPort: 9098
+          SourceSecurityGroupId: !Ref EC2ClientSG
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-msk-sg'
+
+Outputs:
+  MskSubnetIds:
+    Value: !Join [",", [!Ref MskSubnet1, !Ref MskSubnet2]]
+  Ec2SubnetId:
+    Value: !If [CreateNATCondition, !Ref AppPrivateSubnet, !Ref AppPublicSubnet]
+  Ec2SecurityGroupId:
+    Value: !Ref EC2ClientSG
+  MskSecurityGroupId:
+    Value: !Ref MSKSG

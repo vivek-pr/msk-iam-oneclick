@@ -1,5 +1,5 @@
 # msk-iam-oneclick
-One-click MSK IAM POC. CloudFormation provisions VPC, MSK (Serverless), EC2 client + IAM/SSM. A small FastAPI UI (profile-aware) deploys, tests (produce/consume via SASL/IAM), and tears down. All CloudFormation templates live under the `infra/` directory.
+One-click MSK IAM POC. CloudFormation provisions networking, a **provisioned** MSK cluster, an EC2 client + IAM/SSM. A small FastAPI UI (profile-aware) deploys, tests (produce/consume via SASL/IAM), and tears down. All CloudFormation templates live under the `infra/` directory.
 
 ## FastAPI app
 
@@ -24,19 +24,17 @@ uvicorn app.main:app --reload
 Open <http://127.0.0.1:8000> in a browser and submit the form. An STS call is
 made to verify the profile, and the resulting identity is displayed on success.
 
-## VPC stack
+## Network stack
 
-The `infra/vpc.yml` template creates a minimal networking layer for the proof of concept:
+The `infra/network.yaml` template creates two VPCs and wires cross-VPC connectivity via peering:
 
-- `/22` VPC
-- three private subnets across Availability Zones for MSK
-- one public subnet for an EC2 client (set `CreateNAT=true` to place the client in a private subnet and create a NAT gateway)
-- internet gateway and optional NAT routing
-- security groups `EC2ClientSG` and `MSKSG` with rules allowing the EC2 client to reach MSK
+- `VPC_MSK` – private subnets across two Availability Zones for brokers
+- `VPC_APP` – public or private subnets for the EC2 client (set `CreateNAT=true` to place the client in a private subnet and create a NAT gateway)
+- VPC peering connection with DNS resolution enabled on both sides
+- security groups `EC2ClientSG` and `MSKSG` with rules allowing the EC2 client to reach MSK on port 9098
 
 ### Outputs
 
-- `VpcId`
 - `MskSubnetIds` – comma separated private subnets for MSK
 - `Ec2SubnetId` – subnet for the EC2 client
 - `Ec2SecurityGroupId`
@@ -44,7 +42,7 @@ The `infra/vpc.yml` template creates a minimal networking layer for the proof of
 
 ## MSK stack
 
-The `infra/msk.yml` template provisions a minimal MSK Serverless cluster with IAM authentication. It expects the private subnet IDs and security group from the VPC stack and uses AWS-managed encryption at rest.
+The `infra/msk-provisioned.yaml` template provisions a provisioned MSK cluster with IAM authentication and CloudWatch broker logging. It expects the private subnet IDs and security group from the network stack.
 
 ### Parameters
 
@@ -53,7 +51,7 @@ The `infra/msk.yml` template provisions a minimal MSK Serverless cluster with IA
 
 ### Outputs
 
-- `MskClusterArn` – ARN of the created MSK Serverless cluster
+- `MskClusterArn` – ARN of the created MSK cluster
 
 ## EC2 client stack
 
