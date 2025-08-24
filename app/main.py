@@ -192,7 +192,18 @@ async def api_deploy(request: Request) -> Dict[str, str]:
             session = boto3.Session(profile_name=profile, region_name=region)
             cf = session.client("cloudformation")
             kafka = session.client("kafka")
+            ec2 = session.client("ec2")
             infra = Path(__file__).resolve().parent.parent / "infra"
+
+            if existing_tgw:
+                try:
+                    ec2.describe_transit_gateways(TransitGatewayIds=[existing_tgw])
+                except ClientError as e:
+                    if e.response["Error"].get("Code") == "InvalidTransitGatewayID.NotFound":
+                        op.logs.append(f"Transit Gateway {existing_tgw} not found")
+                        op.status = "failed"
+                        return
+                    raise
 
             op.logs.append("Deploying network stack")
             net_params = [
