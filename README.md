@@ -38,12 +38,13 @@ inbound resolver <----- outbound resolver
 ```
 
 - `VPC_MSK` – private subnets across two Availability Zones for brokers
-- `VPC_APP` – public or private subnets for the EC2 client (set `CreateNAT=true`
-  to place the client in a private subnet and create a NAT gateway)
-- Transit Gateway with attachments for both VPCs and routes to the opposite
-  CIDR blocks
+- `VPC_APP` – public subnet and two private subnets for the EC2 client (set
+  `CreateNAT=true` to place the client in a private subnet and create a NAT
+  gateway)
+- Transit Gateway with dedicated route table, VPC attachments, and routes to the
+  opposite CIDR blocks (toggle with `CreateTGW`)
 - Route 53 Resolver inbound endpoint in `VPC_MSK`, outbound endpoint and
-  forwarding rule in `VPC_APP`
+  forwarding rule in `VPC_APP` (toggle with `CreateResolver`)
 - security groups `EC2ClientSG` and `MSKSG` allow the EC2 client to reach MSK on
   port 9098
 
