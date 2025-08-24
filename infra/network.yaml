@@ -209,6 +209,11 @@ Resources:
     Type: AWS::EC2::TransitGateway
     Condition: CreateTGWCondition
     Properties:
+      AmazonSideAsn: 64512
+      AutoAcceptSharedAttachments: enable
+      DefaultRouteTableAssociation: enable
+      DefaultRouteTablePropagation: enable
+      DnsSupport: enable
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-tgw'
