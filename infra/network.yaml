@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Networking for MSK IAM POC with cross-VPC peering
+Description: Networking for MSK IAM POC with Transit Gateway connectivity
 
 Parameters:
   CreateNAT:
@@ -7,6 +7,14 @@ Parameters:
     Default: 'false'
     AllowedValues: ['true', 'false']
     Description: Create NAT gateway and place EC2 in private subnet
+  Env:
+    Type: String
+    Default: dev
+    Description: Environment tag
+  MskBrokerDomain:
+    Type: String
+    Default: c2.kafka.us-east-1.amazonaws.com
+    Description: Domain suffix for MSK broker hostnames (e.g., c2.kafka.us-east-1.amazonaws.com)
 
 Conditions:
   CreateNATCondition: !Equals [!Ref CreateNAT, 'true']
@@ -167,47 +175,177 @@ Resources:
     Properties:
       RouteTableId: !Ref MskRouteTable
       SubnetId: !Ref MskSubnet2
-
-  VPCPeering:
-    Type: AWS::EC2::VPCPeeringConnection
+  TransitGateway:
+    Type: AWS::EC2::TransitGateway
     Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-tgw'
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
+
+  TgwAttachmentApp:
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      TransitGatewayId: !Ref TransitGateway
       VpcId: !Ref VPCAPP
-      PeerVpcId: !Ref VPCMSK
+      SubnetIds:
+        - !Ref AppPrivateSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-app-attach'
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
 
-  VPCPeeringOptionsRequester:
-    Type: AWS::EC2::VPCPeeringConnectionOptions
+  TgwAttachmentMsk:
+    Type: AWS::EC2::TransitGatewayAttachment
     Properties:
-      VpcPeeringConnectionId: !Ref VPCPeering
-      RequesterPeeringConnectionOptions:
-        AllowDnsResolutionFromRemoteVpc: true
+      TransitGatewayId: !Ref TransitGateway
+      VpcId: !Ref VPCMSK
+      SubnetIds:
+        - !Ref MskSubnet1
+        - !Ref MskSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-msk-attach'
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
 
-  VPCPeeringOptionsAccepter:
-    Type: AWS::EC2::VPCPeeringConnectionOptions
-    Properties:
-      VpcPeeringConnectionId: !Ref VPCPeering
-      AccepterPeeringConnectionOptions:
-        AllowDnsResolutionFromRemoteVpc: true
-
-  AppToMskRoutePublic:
+  AppToMskTgwRoutePublic:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref AppPublicRouteTable
       DestinationCidrBlock: 10.0.0.0/22
-      VpcPeeringConnectionId: !Ref VPCPeering
+      TransitGatewayId: !Ref TransitGateway
 
-  AppToMskRoutePrivate:
+  AppToMskTgwRoutePrivate:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref AppPrivateRouteTable
       DestinationCidrBlock: 10.0.0.0/22
-      VpcPeeringConnectionId: !Ref VPCPeering
+      TransitGatewayId: !Ref TransitGateway
 
-  MskToAppRoute:
+  MskToAppTgwRoute:
     Type: AWS::EC2::Route
     Properties:
       RouteTableId: !Ref MskRouteTable
       DestinationCidrBlock: 10.1.0.0/22
-      VpcPeeringConnectionId: !Ref VPCPeering
+      TransitGatewayId: !Ref TransitGateway
+
+  ResolverOutboundSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow DNS queries from app VPC to outbound endpoint
+      VpcId: !Ref VPCAPP
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 10.1.0.0/22
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 10.1.0.0/22
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-resolver-out-sg'
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
+
+  ResolverInboundSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow DNS queries from app VPC to inbound endpoint
+      VpcId: !Ref VPCMSK
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 10.1.0.0/22
+        - IpProtocol: udp
+          FromPort: 53
+          ToPort: 53
+          CidrIp: 10.1.0.0/22
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-resolver-in-sg'
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
+
+  MskResolverInbound:
+    Type: AWS::Route53Resolver::ResolverEndpoint
+    Properties:
+      Name: !Sub '${AWS::StackName}-inbound'
+      Direction: INBOUND
+      IpAddresses:
+        - SubnetId: !Ref MskSubnet1
+          Ip: 10.0.0.10
+        - SubnetId: !Ref MskSubnet2
+          Ip: 10.0.0.74
+      SecurityGroupIds:
+        - !Ref ResolverInboundSG
+      Tags:
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
+
+  AppResolverOutbound:
+    Type: AWS::Route53Resolver::ResolverEndpoint
+    Properties:
+      Name: !Sub '${AWS::StackName}-outbound'
+      Direction: OUTBOUND
+      IpAddresses:
+        - SubnetId: !Ref AppPrivateSubnet
+        - SubnetId: !Ref AppPublicSubnet
+      SecurityGroupIds:
+        - !Ref ResolverOutboundSG
+      Tags:
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
+
+  MskResolverRule:
+    Type: AWS::Route53Resolver::ResolverRule
+    Properties:
+      Name: !Sub '${AWS::StackName}-msk'
+      RuleType: FORWARD
+      DomainName: !Ref MskBrokerDomain
+      ResolverEndpointId: !Ref AppResolverOutbound
+      TargetIps:
+        - Ip: 10.0.0.10
+          Port: 53
+        - Ip: 10.0.0.74
+          Port: 53
+      Tags:
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
+
+  AppResolverRuleAssociation:
+    Type: AWS::Route53Resolver::ResolverRuleAssociation
+    Properties:
+      Name: !Sub '${AWS::StackName}-msk-assoc'
+      ResolverRuleId: !Ref MskResolverRule
+      VPCId: !Ref VPCAPP
 
   EC2ClientSG:
     Type: AWS::EC2::SecurityGroup
@@ -220,6 +358,10 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-ec2-sg'
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
 
   MSKSG:
     Type: AWS::EC2::SecurityGroup
@@ -230,11 +372,15 @@ Resources:
         - IpProtocol: tcp
           FromPort: 9098
           ToPort: 9098
-          SourceSecurityGroupId: !Ref EC2ClientSG
+          CidrIp: 10.1.0.0/22
       Tags:
         - Key: Name
           Value: !Sub '${AWS::StackName}-msk-sg'
-
+        - Key: Stack
+          Value: !Sub '${AWS::StackName}'
+        - Key: Env
+          Value: !Ref Env
+        
 Outputs:
   MskSubnetIds:
     Value: !Join [",", [!Ref MskSubnet1, !Ref MskSubnet2]]
