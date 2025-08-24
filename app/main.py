@@ -185,6 +185,7 @@ async def api_deploy(request: Request) -> Dict[str, str]:
     region = request.session.get("region")
     stack_base = request.session.get("stack_name", "msk-iam-oneclick")
     create_nat = data.get("CreateNAT", False)
+    existing_tgw = data.get("ExistingTransitGatewayId")
 
     def runner(op: Operation) -> None:
         try:
@@ -194,11 +195,24 @@ async def api_deploy(request: Request) -> Dict[str, str]:
             infra = Path(__file__).resolve().parent.parent / "infra"
 
             op.logs.append("Deploying network stack")
+            net_params = [
+                {
+                    "ParameterKey": "CreateNAT",
+                    "ParameterValue": "true" if create_nat else "false",
+                }
+            ]
+            if existing_tgw:
+                net_params.append(
+                    {
+                        "ParameterKey": "ExistingTransitGatewayId",
+                        "ParameterValue": existing_tgw,
+                    }
+                )
             _deploy_stack(
                 cf,
                 f"{stack_base}-network",
                 (infra / "network.yaml").read_text(),
-                [{"ParameterKey": "CreateNAT", "ParameterValue": "true" if create_nat else "false"}],
+                net_params,
                 op,
             )
             op.progress = 25

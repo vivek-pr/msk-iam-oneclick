@@ -42,7 +42,9 @@ inbound resolver <----- outbound resolver
   `CreateNAT=true` to place the client in a private subnet and create a NAT
   gateway)
 - Transit Gateway with dedicated route table, VPC attachments, and routes to the
-  opposite CIDR blocks (toggle with `CreateTGW`)
+  opposite CIDR blocks. Provide `ExistingTransitGatewayId` to import an existing
+  Transit Gateway (stack must run in the same Region), otherwise a new one is
+  created.
 - Route 53 Resolver inbound endpoint in `VPC_MSK`, outbound endpoint and
   forwarding rule in `VPC_APP` (toggle with `CreateResolver`)
 - security groups `EC2ClientSG` and `MSKSG` allow the EC2 client to reach MSK on
