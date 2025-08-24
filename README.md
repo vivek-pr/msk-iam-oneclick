@@ -25,13 +25,41 @@ Open <http://127.0.0.1:8000> in a browser and submit the form. An STS call is
 made to verify the profile, and the resulting identity is displayed on success.
 
 ## Network stack
+The `infra/network.yaml` template creates two VPCs and connects them through a
+Transit Gateway. Route 53 Resolver endpoints preserve broker DNS resolution and
+keep the IAM-authentication path intact:
 
-The `infra/network.yaml` template creates two VPCs and wires cross-VPC connectivity via peering:
+```
+VPC_APP --(attachment)----+
+                           |-- TGW --
+VPC_MSK --(attachment)----+
+      ^                        |
+inbound resolver <----- outbound resolver
+```
 
 - `VPC_MSK` – private subnets across two Availability Zones for brokers
-- `VPC_APP` – public or private subnets for the EC2 client (set `CreateNAT=true` to place the client in a private subnet and create a NAT gateway)
-- VPC peering connection with DNS resolution enabled on both sides
-- security groups `EC2ClientSG` and `MSKSG` with rules allowing the EC2 client to reach MSK on port 9098
+- `VPC_APP` – public or private subnets for the EC2 client (set `CreateNAT=true`
+  to place the client in a private subnet and create a NAT gateway)
+- Transit Gateway with attachments for both VPCs and routes to the opposite
+  CIDR blocks
+- Route 53 Resolver inbound endpoint in `VPC_MSK`, outbound endpoint and
+  forwarding rule in `VPC_APP`
+- security groups `EC2ClientSG` and `MSKSG` allow the EC2 client to reach MSK on
+  port 9098
+
+### Runbook
+
+1. Deploy or update the network stack.
+2. From an EC2 instance in `VPC_APP`, resolve MSK broker hostnames and run the
+   Kafka CLI to list or create topics.
+3. After validation, remove any legacy VPC peering routes and the peering
+   connection.
+
+### Rollback
+
+1. Re-point routes to the VPC peering connection if it still exists.
+2. Delete the Transit Gateway attachments and Route 53 Resolver endpoints and
+   rules.
 
 ### Outputs
 
