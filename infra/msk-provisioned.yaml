@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Provisioned MSK cluster with IAM authentication
+
+Parameters:
+  MskSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private subnet IDs for the cluster
+  MskSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
+    Description: Security group for brokers
+  NumberOfBrokerNodes:
+    Type: Number
+    Default: 2
+    MinValue: 2
+    Description: Number of broker nodes
+
+Resources:
+  MskCluster:
+    Type: AWS::MSK::Cluster
+    Properties:
+      ClusterName: !Sub '${AWS::StackName}'
+      KafkaVersion: 3.5.1
+      NumberOfBrokerNodes: !Ref NumberOfBrokerNodes
+      BrokerNodeGroupInfo:
+        InstanceType: kafka.m5.large
+        ClientSubnets: !Ref MskSubnetIds
+        SecurityGroups:
+          - !Ref MskSecurityGroupId
+      ClientAuthentication:
+        Sasl:
+          Iam:
+            Enabled: true
+      LoggingInfo:
+        BrokerLogs:
+          CloudWatchLogs:
+            Enabled: true
+            LogGroup: !Sub '/aws/msk/${AWS::StackName}'
+
+Outputs:
+  MskClusterArn:
+    Value: !Ref MskCluster
+    Description: ARN of the MSK cluster

@@ -77,7 +77,7 @@ def get_session(request: Request) -> Dict[str, Optional[str]]:
     """Return session information."""
     return {
         "profile": request.session.get("profile"),
-        "region": request.session.get("region", "ap-south-1"),
+        "region": request.session.get("region", "us-east-1"),
         "stack_name": request.session.get("stack_name", "msk-iam-oneclick"),
     }
 
@@ -92,7 +92,7 @@ async def set_session(request: Request) -> Dict[str, bool]:
     if not profile:
         raise HTTPException(status_code=400, detail="profile required")
     request.session["profile"] = profile
-    request.session["region"] = region or "ap-south-1"
+    request.session["region"] = region or "us-east-1"
     request.session["stack_name"] = stack or "msk-iam-oneclick"
     return {"ok": True}
 
@@ -193,25 +193,25 @@ async def api_deploy(request: Request) -> Dict[str, str]:
             kafka = session.client("kafka")
             infra = Path(__file__).resolve().parent.parent / "infra"
 
-            op.logs.append("Deploying VPC stack")
+            op.logs.append("Deploying network stack")
             _deploy_stack(
                 cf,
-                f"{stack_base}-vpc",
-                (infra / "vpc.yml").read_text(),
+                f"{stack_base}-network",
+                (infra / "network.yaml").read_text(),
                 [{"ParameterKey": "CreateNAT", "ParameterValue": "true" if create_nat else "false"}],
                 op,
             )
             op.progress = 25
-            vpc_outputs = _get_stack_outputs(cf, f"{stack_base}-vpc")
+            network_outputs = _get_stack_outputs(cf, f"{stack_base}-network")
 
             op.logs.append("Deploying MSK stack")
             _deploy_stack(
                 cf,
                 f"{stack_base}-msk",
-                (infra / "msk.yml").read_text(),
+                (infra / "msk-provisioned.yaml").read_text(),
                 [
-                    {"ParameterKey": "MskSubnetIds", "ParameterValue": vpc_outputs["MskSubnetIds"]},
-                    {"ParameterKey": "MskSecurityGroupId", "ParameterValue": vpc_outputs["MskSecurityGroupId"]},
+                    {"ParameterKey": "MskSubnetIds", "ParameterValue": network_outputs["MskSubnetIds"]},
+                    {"ParameterKey": "MskSecurityGroupId", "ParameterValue": network_outputs["MskSecurityGroupId"]},
                 ],
                 op,
             )
@@ -225,8 +225,8 @@ async def api_deploy(request: Request) -> Dict[str, str]:
                 f"{stack_base}-ec2",
                 (infra / "ec2.yml").read_text(),
                 [
-                    {"ParameterKey": "Ec2SubnetId", "ParameterValue": vpc_outputs["Ec2SubnetId"]},
-                    {"ParameterKey": "Ec2SecurityGroupId", "ParameterValue": vpc_outputs["Ec2SecurityGroupId"]},
+                    {"ParameterKey": "Ec2SubnetId", "ParameterValue": network_outputs["Ec2SubnetId"]},
+                    {"ParameterKey": "Ec2SecurityGroupId", "ParameterValue": network_outputs["Ec2SecurityGroupId"]},
                     {"ParameterKey": "MskClusterArn", "ParameterValue": cluster_arn},
                 ],
                 op,
@@ -352,7 +352,7 @@ async def api_teardown(request: Request) -> Dict[str, str]:
                 (f"{stack_base}-ssm", 20),
                 (f"{stack_base}-ec2", 50),
                 (f"{stack_base}-msk", 80),
-                (f"{stack_base}-vpc", 95),
+                (f"{stack_base}-network", 95),
             ]
             for name, prog in steps:
                 op.logs.append(f"Deleting {name}")

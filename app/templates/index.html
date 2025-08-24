@@ -42,7 +42,7 @@
           </div>
           <div class="mb-3">
             <label class="form-label">Region</label>
-            <input class="form-control" id="region-input" value="ap-south-1">
+            <input class="form-control" id="region-input" value="us-east-1">
           </div>
           <div class="mb-3">
             <label class="form-label">Stack Name</label>
@@ -56,9 +56,12 @@
               <label class="form-label">Profile</label>
               <select class="form-select" id="deploy-profile"></select>
             </div>
-            <div class="form-check form-switch mb-2">
-              <input class="form-check-input" type="checkbox" id="use-serverless" checked>
-              <label class="form-check-label" for="use-serverless">UseServerless</label>
+            <div class="mb-3">
+              <label class="form-label">Connectivity</label>
+              <select class="form-select" id="connectivity-select">
+                <option value="peering" selected>Peering</option>
+                <option value="privatelink" disabled>MSK PrivateLink</option>
+              </select>
             </div>
             <div class="form-check form-switch mb-2">
               <input class="form-check-input" type="checkbox" id="create-nat">
@@ -162,11 +165,11 @@
       document.getElementById('deploy-form').addEventListener('submit', e => {
         e.preventDefault();
         const profile = document.getElementById('deploy-profile').value;
-        const useServerless = document.getElementById('use-serverless').checked;
+        const connectivity = document.getElementById('connectivity-select').value;
         const createNat = document.getElementById('create-nat').checked;
         const topic = document.getElementById('deploy-topic').value;
         const logEl = document.getElementById('deploy-log'); logEl.textContent='';
-        startOp('/api/deploy', {profile, UseServerless:useServerless, CreateNAT:createNat, TopicName:topic}, logEl, outputs => {
+        startOp('/api/deploy', {profile, Connectivity:connectivity, CreateNAT:createNat, TopicName:topic}, logEl, outputs => {
           const out = document.getElementById('deploy-out');
           out.innerHTML = `<div class="card"><div class="card-body"><div>ClusterArn: ${outputs.ClusterArn}</div><div>BootstrapBrokers: ${outputs.BootstrapBrokers}</div><div>Ec2InstanceId: ${outputs.Ec2InstanceId}</div></div></div>`;
         });
