@@ -112,3 +112,13 @@ can create and use arbitrary names.
 ## SSM document
 
 The `infra/ssm.yml` template defines an `AWS::SSM::Document` that installs the Kafka CLI, Java 17, and the AWS MSK IAM authentication library on an EC2 instance. The document creates `/opt/msk/client.properties` configured for `SASL_SSL` with IAM, downloads the `aws-msk-iam-auth` JAR, and writes helper scripts `/opt/msk/produce.sh` and `consume.sh`.
+
+## Debugging
+
+Use the following AWS CLI commands to inspect cluster creation and networking details when troubleshooting deployments:
+
+- `aws kafka describe-cluster-v2 --cluster-arn <arn>`
+- `aws kafka list-cluster-operations --cluster-arn <arn>`
+- `aws kafka describe-cluster-operation --cluster-operation-arn <op-arn>`
+- `aws iam get-role --role-name AWSServiceRoleForKafka`
+- `aws ec2 describe-subnets --subnet-ids <subnet-ids> --query 'Subnets[].AvailableIpAddressCount'`

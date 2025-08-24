@@ -15,26 +15,39 @@ Parameters:
     Description: Number of broker nodes
 
 Resources:
+  MskLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/msk/${AWS::StackName}'
+
   MskCluster:
     Type: AWS::MSK::Cluster
+    DependsOn: MskLogGroup
     Properties:
       ClusterName: !Sub '${AWS::StackName}'
-      KafkaVersion: 3.5.1
+      KafkaVersion: 3.6.0
       NumberOfBrokerNodes: !Ref NumberOfBrokerNodes
       BrokerNodeGroupInfo:
         InstanceType: kafka.m5.large
         ClientSubnets: !Ref MskSubnetIds
         SecurityGroups:
           - !Ref MskSecurityGroupId
+        StorageInfo:
+          EBSStorageInfo:
+            VolumeSize: 1000
       ClientAuthentication:
         Sasl:
           Iam:
             Enabled: true
+      EncryptionInfo:
+        EncryptionInTransit:
+          ClientBroker: TLS
+          InCluster: true
       LoggingInfo:
         BrokerLogs:
           CloudWatchLogs:
             Enabled: true
-            LogGroup: !Sub '/aws/msk/${AWS::StackName}'
+            LogGroup: !Ref MskLogGroup
 
 Outputs:
   MskClusterArn:
