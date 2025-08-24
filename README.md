@@ -43,8 +43,9 @@ inbound resolver <----- outbound resolver
   gateway)
 - Transit Gateway with dedicated route table, VPC attachments, and routes to the
   opposite CIDR blocks. Provide `ExistingTransitGatewayId` to import an existing
-  Transit Gateway (stack must run in the same Region), otherwise a new one is
-  created.
+  Transit Gateway (stack must run in the same Region and account). Validate the
+  ID beforehand with `aws ec2 describe-transit-gateways --transit-gateway-ids
+  <id>`; otherwise a new Transit Gateway is created.
 - Route 53 Resolver inbound endpoint in `VPC_MSK`, outbound endpoint and
   forwarding rule in `VPC_APP` (toggle with `CreateResolver`)
 - security groups `EC2ClientSG` and `MSKSG` allow the EC2 client to reach MSK on

@@ -233,6 +233,7 @@ Resources:
   TgwAttachmentApp:
     Type: AWS::EC2::TransitGatewayVpcAttachment
     DependsOn:
+      - TransitGateway
       - TransitGatewayRouteTable
     Properties:
       TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
@@ -251,6 +252,7 @@ Resources:
   TgwAttachmentMsk:
     Type: AWS::EC2::TransitGatewayVpcAttachment
     DependsOn:
+      - TransitGateway
       - TransitGatewayRouteTable
     Properties:
       TransitGatewayId: !If [UseExistingTGW, !Ref ExistingTransitGatewayId, !Ref TransitGateway]
@@ -292,6 +294,9 @@ Resources:
 
   TgwRouteApp:
     Type: AWS::EC2::TransitGatewayRoute
+    DependsOn:
+      - TransitGatewayRouteTable
+      - TgwAttachmentApp
     Properties:
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
       DestinationCidrBlock: 10.1.0.0/22
@@ -299,6 +304,9 @@ Resources:
 
   TgwRouteMsk:
     Type: AWS::EC2::TransitGatewayRoute
+    DependsOn:
+      - TransitGatewayRouteTable
+      - TgwAttachmentMsk
     Properties:
       TransitGatewayRouteTableId: !Ref TransitGatewayRouteTable
       DestinationCidrBlock: 10.0.0.0/22
@@ -306,6 +314,7 @@ Resources:
 
   AppToMskTgwRoutePublic:
     Type: AWS::EC2::Route
+    DependsOn: TgwAttachmentApp
     Properties:
       RouteTableId: !Ref AppPublicRouteTable
       DestinationCidrBlock: 10.0.0.0/22
@@ -313,6 +322,7 @@ Resources:
 
   AppToMskTgwRoutePrivate:
     Type: AWS::EC2::Route
+    DependsOn: TgwAttachmentApp
     Properties:
       RouteTableId: !Ref AppPrivateRouteTable
       DestinationCidrBlock: 10.0.0.0/22
@@ -320,6 +330,7 @@ Resources:
 
   MskToAppTgwRoute:
     Type: AWS::EC2::Route
+    DependsOn: TgwAttachmentMsk
     Properties:
       RouteTableId: !Ref MskRouteTable
       DestinationCidrBlock: 10.1.0.0/22
